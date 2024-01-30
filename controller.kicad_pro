@@ -55,7 +55,12 @@
           "width": 0.0
         }
       ],
-      "drc_exclusions": [],
+      "drc_exclusions": [
+        "clearance|135401100|128503600|9e1f18c0-f001-4ca7-9432-7d1848935175|84389a6b-5206-42a5-85ab-3895002950ae",
+        "clearance|145601100|128503600|b90f1b52-a294-40e2-8a06-55d15b049673|20287562-c623-4fa7-bc3a-60ffd289b900",
+        "clearance|151401100|128503600|d63c5fe9-07b3-44a4-a79c-4797911fe1f8|78967a52-95db-43c4-8339-b7d458fad485",
+        "clearance|161601100|128503600|9424ddf8-3364-4f7c-baee-a386ac8f2c31|3d88863d-554e-4f32-9aae-c7474a164e98"
+      ],
       "meta": {
         "filename": "board_design_settings.json",
         "version": 2
@@ -499,6 +504,14 @@
       {
         "netclass": "SHUNT",
         "pattern": "/SX*_*"
+      },
+      {
+        "netclass": "MOTOR",
+        "pattern": "V+"
+      },
+      {
+        "netclass": "MOTOR",
+        "pattern": "Net-*"
       }
     ]
   },
