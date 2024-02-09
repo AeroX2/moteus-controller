@@ -27,3 +27,15 @@ fp-info-cache
 # Exported BOM files
 *.xml
 *.csv
+
+jlcpcb
+production
+nppBackup
+
+# PlatformIO ignore
+.vscode
+.pioenvs
+.piolibdeps
+.clang_complete
+.gcc-flags.json
+.pio
