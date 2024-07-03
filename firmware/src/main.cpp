@@ -8,13 +8,16 @@
 #include "utilities/stm32math/STM32G4CORDICTrigFunctions.h"
 
 // magnetic sensor instance - I2C
-MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
+// MagneticSensorI2C sensor = MagneticSensorSPI(AS5600_I2C);
 
 // BLDC motor & driver instance
 STSPIN32G4 driver = STSPIN32G4();
 BLDCMotor motor = BLDCMotor(7, 0.3, 330);
 
 SoftwareSerial softwareSerial(PC14, PC15);
+STM32_CAN Can(FDCAN1, DEF);
+
+static CAN_message_t CAN_TX_msg;
 
 // commander interface
 Commander command = Commander(softwareSerial);
@@ -53,7 +56,7 @@ void setup() {
     softwareSerial.println("CORDIC init failed");
 
   // initialise magnetic sensor hardware
-  sensor.init(&twoWire);
+  // sensor.init(&twoWire);
   // link the motor to the sensor
   // motor.linkSensor(&sensor);
 
@@ -97,13 +100,18 @@ void setup() {
   // Run user commands to configure and the motor (find the full command list in docs.simplefoc.com)
   softwareSerial.println(F("Motor commands sketch | Initial motion control > torque/voltage : target 2V."));
 
+  Can.begin();
+  // Can.enableLoopBack();
+  Can.setBaudRate(500000);
+
   _delay(1000);
 }
 
 // bool flip = false;
-// long old_time = 0;
+long old_time = 0;
 // float target = 5.0f;
 
+bool ledOn = false;
 void loop() {
   // // iterative setting of the FOC phase voltage
   motor.loopFOC();
@@ -117,10 +125,74 @@ void loop() {
   // // user communication
   command.run();
 
-  // if (millis() - old_time > 3000) {
-  //   printDriverStatus();
-  //   target = 0.0f;
-  //   old_time = millis();
-  // }
+  if (millis() - old_time > 3000) {
+    ledOn = !ledOn;
+    digitalWrite(PC2, ledOn ? LOW : HIGH);
+
+    CAN_TX_msg.id = (0x321);
+    CAN_TX_msg.len = 8;
+    CAN_TX_msg.buf[0] =  0x42;
+    CAN_TX_msg.buf[1] =  0xad;
+    CAN_TX_msg.buf[2] =  0x12;
+    CAN_TX_msg.buf[3] =  0x34;
+    CAN_TX_msg.buf[4] =  0x56;
+    CAN_TX_msg.buf[5] =  0x78;
+    CAN_TX_msg.buf[6] =  0x9a;
+    CAN_TX_msg.buf[7] =  0xbc;
+    // CAN_TX_msg.buf[8] =  0xde;
+    // CAN_TX_msg.buf[9] =  0xf1;
+    // CAN_TX_msg.buf[10] =  0x12;
+    // CAN_TX_msg.buf[11] =  0x34;
+    // CAN_TX_msg.buf[12] =  0x56;
+    // CAN_TX_msg.buf[13] =  0x78;
+    // CAN_TX_msg.buf[14] =  0x9a;
+    // CAN_TX_msg.buf[15] =  0xab;
+
+    Can.write(CAN_TX_msg);
+    
+    old_time = millis();
+  }
   // delayMicroseconds(100);
+}
+
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Configure the main internal regulator output voltage
+  */
+  HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1_BOOST);
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;
+  RCC_OscInitStruct.PLL.PLLN = 85;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV8;
+  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
+  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
