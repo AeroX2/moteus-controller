@@ -12,7 +12,7 @@
 
 // BLDC motor & driver instance
 STSPIN32G4 driver = STSPIN32G4();
-BLDCMotor motor = BLDCMotor(7, 0.3, 330);
+BLDCMotor motor = BLDCMotor(12, 0.09, 300);
 
 SoftwareSerial softwareSerial(PC14, PC15);
 STM32_CAN Can(FDCAN1, DEF);
