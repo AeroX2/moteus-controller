@@ -2,37 +2,44 @@
 
 #include "SimpleFOC.h"
 #include "SimpleFOCDrivers.h"
+#include "STM32_CAN.h"
+#include "stm32g4xx_hal_opamp.h"
 #include "drivers/stspin32g4/STSPIN32G4.h"
 #include "utilities/stm32math/STM32G4CORDICTrigFunctions.h"
 
-// magnetic sensor instance - I2C
-MagneticSensorSPI sensor = MagneticSensorSPI(AS5048_SPI, PD2);
+// Magnetic sensor instance - I2C
+MagneticSensorSPI magnetic_sensor = MagneticSensorSPI(AS5048_SPI, PD2);
+SPIClass spi_class(PB5, PB4, PB3);
+
+// Low side current sense sensor
+LowsideCurrentSense current_sense = LowsideCurrentSense(0.0005f, 32.0 / 7.0 * 1000.0, PB1, _NC, PA2);
 
 // BLDC motor & driver instance
 STSPIN32G4 driver = STSPIN32G4();
-BLDCMotor motor = BLDCMotor(7); //, 0.3);  //, 300);
+BLDCMotor motor = BLDCMotor(7, 0.0946, 330, 2.3e-05);
 
-// STM32_CAN Can(FDCAN1, DEF);
+// CAN communication
+STM32_CAN Can(FDCAN1, DEF);
+static CAN_message_t CAN_TX_msg;
 
-// static CAN_message_t CAN_TX_msg;
-
-float target_velocity = 0;
-// commander interface
+// Commander interface
 Commander command = Commander(Serial);
-void onStop(char* cmd) {
+float target_velocity = 0;
+
+void on_stop(char* cmd) {
   motor.disable();
 }
-void onMotor(char* cmd) {
+
+void on_motor(char* cmd) {
   // command.motor(&motor, cmd);
   command.scalar(&target_velocity, cmd);
 }
-void doLed(char* cmd) {
-  if (*cmd == '0')
-    digitalWrite(PC2, LOW);
-  else
-    digitalWrite(PC2, HIGH);
+
+void on_led(char* cmd) {
+  digitalWrite(PC2, cmd[0] == '0' ? LOW : HIGH);
 }
-void doStatus(char* cmd) {
+
+void on_status(char* cmd) {
   Serial.println("Driver status: ");
   STSPIN32G4Status status = driver.status();
   Serial.print("      Lock: ");
@@ -47,7 +54,65 @@ void doStatus(char* cmd) {
   Serial.println(status.thsd ? "YES" : "NO");
 }
 
-SPIClass spi_class(PB5, PB4, PB3);
+OPAMP_HandleTypeDef hopamp1;
+OPAMP_HandleTypeDef hopamp2;
+OPAMP_HandleTypeDef hopamp3;
+
+void opamp_init(void) {
+  // hopamp->Instance = OPAMPx_Def;
+  // hopamp->Init.PowerMode = OPAMP_POWERMODE_HIGHSPEED;
+  // hopamp->Init.Mode = OPAMP_PGA_MODE;
+  // hopamp->Init.NonInvertingInput = OPAMP_NONINVERTINGINPUT_IO0;
+  // hopamp->Init.InternalOutput = DISABLE;
+  // hopamp->Init.TimerControlledMuxmode = OPAMP_TIMERCONTROLLEDMUXMODE_DISABLE;
+  // hopamp->Init.PgaConnect = OPAMP_PGA_CONNECT_INVERTINGINPUT_IO0_BIAS;
+  // hopamp->Init.PgaGain = OPAMP_PGA_GAIN_16_OR_MINUS_15;
+  // hopamp->Init.UserTrimming = OPAMP_TRIMMING_FACTORY;
+
+  hopamp1.Instance = OPAMP1;
+  hopamp1.Init.PowerMode = OPAMP_POWERMODE_HIGHSPEED;
+  hopamp1.Init.Mode = OPAMP_PGA_MODE;
+  hopamp1.Init.NonInvertingInput = OPAMP_NONINVERTINGINPUT_IO0;
+  hopamp1.Init.InternalOutput = DISABLE;
+  hopamp1.Init.TimerControlledMuxmode = OPAMP_TIMERCONTROLLEDMUXMODE_DISABLE;
+  hopamp1.Init.PgaConnect = OPAMP_PGA_CONNECT_INVERTINGINPUT_IO0_BIAS;
+  hopamp1.Init.PgaGain = OPAMP_PGA_GAIN_8_OR_MINUS_7;
+  hopamp1.Init.UserTrimming = OPAMP_TRIMMING_FACTORY;
+
+  hopamp2.Instance = OPAMP2;
+  hopamp2.Init.PowerMode = OPAMP_POWERMODE_HIGHSPEED;
+  hopamp2.Init.Mode = OPAMP_PGA_MODE;
+  hopamp2.Init.NonInvertingInput = OPAMP_NONINVERTINGINPUT_IO0;
+  hopamp2.Init.InternalOutput = DISABLE;
+  hopamp2.Init.TimerControlledMuxmode = OPAMP_TIMERCONTROLLEDMUXMODE_DISABLE;
+  hopamp2.Init.PgaConnect = OPAMP_PGA_CONNECT_INVERTINGINPUT_IO0_BIAS;
+  hopamp2.Init.PgaGain = OPAMP_PGA_GAIN_8_OR_MINUS_7;
+  hopamp2.Init.UserTrimming = OPAMP_TRIMMING_FACTORY;
+
+  hopamp3.Instance = OPAMP3;
+  hopamp3.Init.PowerMode = OPAMP_POWERMODE_HIGHSPEED;
+  hopamp3.Init.Mode = OPAMP_PGA_MODE;
+  hopamp3.Init.NonInvertingInput = OPAMP_NONINVERTINGINPUT_IO0;
+  hopamp3.Init.InternalOutput = DISABLE;
+  hopamp3.Init.TimerControlledMuxmode = OPAMP_TIMERCONTROLLEDMUXMODE_DISABLE;
+  hopamp3.Init.PgaConnect = OPAMP_PGA_CONNECT_INVERTINGINPUT_IO0_BIAS;
+  hopamp3.Init.PgaGain = OPAMP_PGA_GAIN_8_OR_MINUS_7;
+  hopamp3.Init.UserTrimming = OPAMP_TRIMMING_FACTORY;
+
+  if (
+      HAL_OPAMP_Init(&hopamp1) != HAL_OK &&
+      HAL_OPAMP_Init(&hopamp2) != HAL_OK &&
+      HAL_OPAMP_Init(&hopamp3) != HAL_OK) {
+    Error_Handler();
+  }
+
+  if (
+      HAL_OPAMP_Start(&hopamp1) != HAL_OK &&
+      HAL_OPAMP_Start(&hopamp2) != HAL_OK &&
+      HAL_OPAMP_Start(&hopamp3) != HAL_OK) {
+    Error_Handler();
+  }
+}
 
 void setup() {
   Serial.setRx(PA10);
@@ -59,97 +124,64 @@ void setup() {
   if (!SimpleFOC_CORDIC_Config())
     Serial.println("CORDIC init failed");
 
-  // initialise magnetic sensor hardware
-  sensor.init(&spi_class);
-  // link the motor to the sensor
-  motor.linkSensor(&sensor);
-
-  // driver config
-  // power supply voltage [V]
   driver.voltage_power_supply = 24.0f;
-  // driver.pwm_frequency = 20000;
+  driver.pwm_frequency = 20000;
   // driver.dead_zone = 0.05;
   driver.init();
-
   motor.linkDriver(&driver);
+  current_sense.linkDriver(&driver);
 
   Serial.print("Driver ready: ");
   Serial.println(driver.isReady() ? "true" : "false");
   Serial.print("Driver fault: ");
   Serial.println(driver.isFault() ? "true" : "false");
 
-  // motor.PID_velocity.P = 40.0f;
-  // motor.PID_velocity.I = 0.0f;
-  // motor.PID_velocity.D = 0.001f;
-  // motor.LPF_velocity.Tf = 0.04f;
-  motor.PID_velocity.P = 0.2;
-  motor.PID_velocity.I = 20;
-  motor.PID_velocity.D = 0.001;
-  motor.LPF_velocity.Tf = 0.01;
-  motor.PID_velocity.output_ramp = 1000;
+  // Initialise the op amps for the current sensing
+  opamp_init();
+  current_sense.init();
+  motor.linkCurrentSense(&current_sense);
 
-  motor.P_angle.P = 20;
-  motor.P_angle.I = 0;  // usually only P controller is enough
-  motor.P_angle.D = 0;  // usually only P controller is enough
-  // acceleration control using output ramp
-  // this variable is in rad/s^2 and sets the limit of acceleration
-  motor.P_angle.output_ramp = 10000;  // default 1e6 rad/s^2
-  // angle low pass filtering
-  // default 0 - disabled
-  // use only for very noisy position sensors - try to avoid and keep the values very small
-  motor.LPF_angle.Tf = 0;  // default 0
-  // setting the limits
-  //  maximal velocity of the position control
-  // motor.velocity_limit = 4;  // rad/s - default 20
+  // Initialise the magnetic sensor for position sensing
+  magnetic_sensor.init(&spi_class);
+  motor.linkSensor(&magnetic_sensor);
 
-  motor.monitor_downsample = 4;
-  motor.useMonitoring(Serial);
-
-  // set control loop type to be used
-  motor.current_limit = 2;
+  // Setup motor limits
+  motor.current_limit = 1;
   motor.voltage_limit = 1;
-  motor.voltage_sensor_align = 5;
-  motor.torque_controller = TorqueControlType::voltage;
-  motor.controller = MotionControlType::velocity;
+  // motor.velocity_limit = 20;
+  // motor.torque_controller = TorqueControlType::foc_current;
+  motor.controller = MotionControlType::velocity_openloop;
+  // motor.monitor_downsample = 4;
+  // motor.useMonitoring(Serial);
 
-  // align encoder and start FOC
+  // Align encoder and start FOC
   motor.init();
   motor.initFOC();
 
   pinMode(PC2, OUTPUT);
-  command.add('A', onMotor, "motor");
-  command.add('L', doLed, "led control");
-  command.add('T', doStatus, "driver status");
-  command.add('S', onStop, "stop");
+  command.add('A', on_motor, "motor");
+  command.add('L', on_led, "led control");
+  command.add('T', on_status, "driver status");
+  command.add('S', on_stop, "stop");
 
-  // Run user commands to configure and the motor (find the full command list in docs.simplefoc.com)
-  Serial.println(F("Motor commands sketch | Initial motion control > torque/voltage : target 2V."));
+  Can.begin();
+  Can.setBaudRate(500000);
 
-  // Can.begin();
-  // Can.setBaudRate(500000);
+  Serial.println("SimpleFOC ready!");
 
   _delay(1000);
 }
 
-// bool flip = false;
 long old_time = 0;
-// float target = 5.0f;
 
-bool ledOn = false;
 void loop() {
-  // iterative setting of the FOC phase voltage
   motor.loopFOC();
-
-  // // iterative function setting the outter loop target
-  // // velocity, position or voltage
-  // // if target not set in parameter uses motor.target variable
   motor.move(target_velocity);
   // motor.monitor();
 
-  // // user communication
   command.run();
 
-  // if (millis() - old_time > 100) {
+  // if (millis() - old_time > 50) {
   // ledOn = !ledOn;
   // digitalWrite(PC2, ledOn ? LOW : HIGH);
   // Serial.print("Sensor angle: ");
@@ -167,10 +199,7 @@ void loop() {
   // CAN_TX_msg.buf[7] =  0xbc;
 
   // Can.write(CAN_TX_msg);
-
-  //   old_time = millis();
   // }
-  // delayMicroseconds(100);
 }
 
 void SystemClock_Config(void) {
