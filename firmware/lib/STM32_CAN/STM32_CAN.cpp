@@ -253,7 +253,7 @@ bool STM32_CAN::write(CAN_message_t &CAN_tx_msg, bool sendMB)
   }
   else{
     TxHeader.TxFrameType   = FDCAN_DATA_FRAME;
-    TxHeader.DataLength   = ((uint32_t)(CAN_tx_msg.len)) << 16;
+    TxHeader.DataLength   = CAN_tx_msg.len;
   }
 
   TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
