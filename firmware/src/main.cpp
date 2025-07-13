@@ -1,11 +1,11 @@
 #include <Arduino.h>
 
-#include "STM32_CAN.h"
 #include "SimpleFOC.h"
 #include "SimpleFOCDrivers.h"
 #include "drivers/stspin32g4/STSPIN32G4.h"
 // #include "stm32g4xx_hal_opamp.h"
 #include "utilities/stm32math/STM32G4CORDICTrigFunctions.h"
+#include "ACANFD_STM32.h"
 
 // Magnetic sensor instance - I2C
 MagneticSensorSPI magnetic_sensor = MagneticSensorSPI(AS5048_SPI, PD2);
@@ -20,9 +20,9 @@ STSPIN32G4 driver = STSPIN32G4();
 BLDCMotor motor = BLDCMotor(7, 0.04);
 
 // CAN communication
-STM32_CAN Can(FDCAN1, DEF);
-static CAN_message_t CAN_TX_msg;
-static CAN_message_t CAN_RX_msg;
+static CANFDMessage CAN_TX_msg;
+static CANFDMessage CAN_RX_msg;
+static long update_frequency = 100;
 
 // Commander interface
 Commander command = Commander(Serial);
@@ -67,6 +67,14 @@ void on_reset(char* cmd) {
   Serial.println(driver.isReady() ? "true" : "false");
   Serial.print("Driver fault: ");
   Serial.println(driver.isFault() ? "true" : "false");
+}
+
+void on_update_frequency(char* cmd) {
+  update_frequency = atoi(cmd);
+
+  Serial.print("Setting CAN update frequency to ");
+  Serial.print(update_frequency);
+  Serial.println("ms");
 }
 
 OPAMP_HandleTypeDef hopamp1;
@@ -165,7 +173,7 @@ void setup() {
   motor.PID_current_q.I = 3; 
   motor.PID_current_q.D = 0; 
 
-  motor.PID_current_d.P= 0.5;
+  motor.PID_current_d.P = 0.5;
   motor.PID_current_d.I = 3;
   motor.PID_current_d.D = 0;
 
@@ -188,11 +196,27 @@ void setup() {
   command.add('T', on_status, "driver status");
   command.add('R', on_reset, "driver reset");
   command.add('S', on_stop, "stop");
+  command.add('U', on_update_frequency, "update frequency");
 
-  // Can.setAutoBusOffRecovery(true);
-  Can.begin();
-  Can.setBaudRate(500000);
   id = HAL_GetUIDw0();
+  
+  // Configure ACANFD_STM32 for FD mode with bit rate switching
+  ACANFD_STM32_Settings settings(1000000, DataBitRateFactor::x5);
+  
+  ACANFD_STM32_StandardFilters standardFilters ;
+  standardFilters.addSingle(id, ACANFD_STM32_FilterAction::FIFO0) ;
+  settings.mNonMatchingStandardFrameReception = ACANFD_STM32_FilterAction::REJECT ;
+  
+  const uint32_t errorCode = fdcan1.beginFD(settings, standardFilters);
+  if (errorCode == 0) {
+    Serial.println("CANFD configuration OK");
+  } else {
+    Serial.print("CANFD configuration error: 0x");
+    Serial.println(errorCode, HEX);
+  }
+
+  Serial.print("My CAN ID: 0x");
+  Serial.println(id, HEX);
 
   Serial.println("SimpleFOC ready!");
 
@@ -208,12 +232,12 @@ void loop() {
   command.run();
   motor.monitor();
 
-  if (Can.read(CAN_RX_msg)) {
-    Serial.println((char*)CAN_RX_msg.buf);
-    command.run((char*)CAN_RX_msg.buf);
+  if (fdcan1.receiveFD0(CAN_RX_msg)) {
+    Serial.println((char*)CAN_RX_msg.data);
+    command.run((char*)CAN_RX_msg.data);
   }
 
-  if (millis() - old_time > 100) {
+  if (millis() - old_time > update_frequency) {
     float angle = magnetic_sensor.getAngle();
     float velocity = magnetic_sensor.getVelocity();
 
@@ -231,16 +255,18 @@ void loop() {
 
     CAN_TX_msg.id = id;
     CAN_TX_msg.len = 8;
-    CAN_TX_msg.buf[0] = angle_to_bytes.b[0];
-    CAN_TX_msg.buf[1] = angle_to_bytes.b[1];
-    CAN_TX_msg.buf[2] = angle_to_bytes.b[2];
-    CAN_TX_msg.buf[3] = angle_to_bytes.b[3];
-    CAN_TX_msg.buf[4] = velocity_to_bytes.b[0];
-    CAN_TX_msg.buf[5] = velocity_to_bytes.b[1];
-    CAN_TX_msg.buf[6] = velocity_to_bytes.b[2];
-    CAN_TX_msg.buf[7] = velocity_to_bytes.b[3];
+    CAN_TX_msg.ext = true;
+    CAN_TX_msg.type = CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH;
+    CAN_TX_msg.data[0] = angle_to_bytes.b[0];
+    CAN_TX_msg.data[1] = angle_to_bytes.b[1];
+    CAN_TX_msg.data[2] = angle_to_bytes.b[2];
+    CAN_TX_msg.data[3] = angle_to_bytes.b[3];
+    CAN_TX_msg.data[4] = velocity_to_bytes.b[0];
+    CAN_TX_msg.data[5] = velocity_to_bytes.b[1];
+    CAN_TX_msg.data[6] = velocity_to_bytes.b[2];
+    CAN_TX_msg.data[7] = velocity_to_bytes.b[3];
 
-    Can.write(CAN_TX_msg);
+    fdcan1.tryToSendReturnStatusFD(CAN_TX_msg);
 
     old_time = millis();
   }
@@ -264,8 +290,8 @@ void SystemClock_Config(void) {
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;
-  RCC_OscInitStruct.PLL.PLLN = 85;
+  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV2;
+  RCC_OscInitStruct.PLL.PLLN = 20;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV8;
   RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
   RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
