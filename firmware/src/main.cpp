@@ -22,6 +22,7 @@ BLDCMotor motor = BLDCMotor(7, 0.04);
 // CAN communication
 static CANFDMessage CAN_TX_msg;
 static CANFDMessage CAN_RX_msg;
+static uint32_t id;
 static long update_frequency = 100;
 
 // Commander interface
@@ -40,23 +41,46 @@ void on_led(char* cmd) {
 }
 
 void on_status(char* cmd) {
-  Serial.println("Driver status: ");
+  // Send status through CAN instead of Serial
   STSPIN32G4Status status = driver.status();
-  Serial.print("      Lock: ");
-  Serial.println(status.lock ? "LOCKED" : "UNLOCKED");
-  Serial.print("  VCC UVLO: ");
-  Serial.println(status.vcc_uvlo ? "YES" : "NO");
-  Serial.print("     VDS P: ");
-  Serial.println(status.vds_p ? "YES" : "NO");
-  Serial.print("     RESET: ");
-  Serial.println(status.reset ? "YES" : "NO");
-  Serial.print("      TSHD: ");
-  Serial.println(status.thsd ? "YES" : "NO");
-
-  Serial.print("Driver ready: ");
-  Serial.println(driver.isReady() ? "true" : "false");
-  Serial.print("Driver fault: ");
-  Serial.println(driver.isFault() ? "true" : "false");
+  
+  // Use the same CAN ID as other messages
+  CAN_TX_msg.id = id;
+  CAN_TX_msg.len = 8;
+  CAN_TX_msg.ext = true;
+  CAN_TX_msg.type = CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH;
+  
+  // Pack status information into 8 bytes:
+  // Byte 0: Message type (0x01 for status)
+  // Byte 1: Status flags (lock, vcc_uvlo, vds_p, reset, thsd)
+  // Byte 2: Driver ready flag
+  // Byte 3: Driver fault flag
+  // Bytes 4-7: Reserved for future use
+  
+  CAN_TX_msg.data[0] = 0x01; // Message type = status
+  
+  // Pack status flags into byte 1
+  uint8_t status_flags = 0;
+  if (status.lock) status_flags |= 0x01;
+  if (status.vcc_uvlo) status_flags |= 0x02;
+  if (status.vds_p) status_flags |= 0x04;
+  if (status.reset) status_flags |= 0x08;
+  if (status.thsd) status_flags |= 0x10;
+  CAN_TX_msg.data[1] = status_flags;
+  
+  CAN_TX_msg.data[2] = driver.isReady() ? 0x01 : 0x00;
+  CAN_TX_msg.data[3] = driver.isFault() ? 0x01 : 0x00;
+  
+  // Reserved bytes
+  CAN_TX_msg.data[4] = 0x00;
+  CAN_TX_msg.data[5] = 0x00;
+  CAN_TX_msg.data[6] = 0x00;
+  CAN_TX_msg.data[7] = 0x00;
+  
+  fdcan1.tryToSendReturnStatusFD(CAN_TX_msg);
+  
+  // Also print to Serial for debugging
+  Serial.println("Driver status sent via CAN");
 }
 
 void on_reset(char* cmd) {
@@ -111,8 +135,6 @@ void opamp_init(void) {
     Error_Handler();
   }
 }
-
-uint32_t id;
 
 void setup() {
   Serial.setRx(PA10);
@@ -170,11 +192,11 @@ void setup() {
   // motor.useMonitoring(Serial);
 
   motor.PID_current_q.P = 0.5; 
-  motor.PID_current_q.I = 3; 
+  motor.PID_current_q.I = 0; 
   motor.PID_current_q.D = 0; 
 
   motor.PID_current_d.P = 0.5;
-  motor.PID_current_d.I = 3;
+  motor.PID_current_d.I = 0;
   motor.PID_current_d.D = 0;
 
   motor.LPF_current_q.Tf = 0.01; 
@@ -203,9 +225,9 @@ void setup() {
   // Configure ACANFD_STM32 for FD mode with bit rate switching
   ACANFD_STM32_Settings settings(1000000, DataBitRateFactor::x5);
   
-  ACANFD_STM32_StandardFilters standardFilters ;
-  standardFilters.addSingle(id, ACANFD_STM32_FilterAction::FIFO0) ;
-  settings.mNonMatchingStandardFrameReception = ACANFD_STM32_FilterAction::REJECT ;
+  ACANFD_STM32_StandardFilters standardFilters;
+  standardFilters.addSingle(id, ACANFD_STM32_FilterAction::FIFO0);
+  settings.mNonMatchingStandardFrameReception = ACANFD_STM32_FilterAction::REJECT;
   
   const uint32_t errorCode = fdcan1.beginFD(settings, standardFilters);
   if (errorCode == 0) {
@@ -230,7 +252,7 @@ void loop() {
   motor.move();
 
   command.run();
-  motor.monitor();
+  // motor.monitor();
 
   if (fdcan1.receiveFD0(CAN_RX_msg)) {
     Serial.println((char*)CAN_RX_msg.data);
@@ -245,7 +267,7 @@ void loop() {
       float f;
       unsigned char b[4];
     } angle_to_bytes;
-    angle_to_bytes.f = angle;
+    angle_to_bytes.f = motor.sensor_direction == Direction::CW ? angle : -angle;
 
     union {
       float f;
@@ -253,22 +275,36 @@ void loop() {
     } velocity_to_bytes;
     velocity_to_bytes.f = velocity;
 
-    CAN_TX_msg.id = id;
-    CAN_TX_msg.len = 8;
+    // Message type: 0x00 = angle/velocity data
+    CAN_TX_msg.id = id; // Standard ID for angle/velocity (no type bits)
+    CAN_TX_msg.len = 12;
     CAN_TX_msg.ext = true;
     CAN_TX_msg.type = CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH;
-    CAN_TX_msg.data[0] = angle_to_bytes.b[0];
-    CAN_TX_msg.data[1] = angle_to_bytes.b[1];
-    CAN_TX_msg.data[2] = angle_to_bytes.b[2];
-    CAN_TX_msg.data[3] = angle_to_bytes.b[3];
-    CAN_TX_msg.data[4] = velocity_to_bytes.b[0];
-    CAN_TX_msg.data[5] = velocity_to_bytes.b[1];
-    CAN_TX_msg.data[6] = velocity_to_bytes.b[2];
-    CAN_TX_msg.data[7] = velocity_to_bytes.b[3];
+    CAN_TX_msg.data[0] = 0x00; // Message type = angle/velocity
+    CAN_TX_msg.data[1] = angle_to_bytes.b[0];
+    CAN_TX_msg.data[2] = angle_to_bytes.b[1];
+    CAN_TX_msg.data[3] = angle_to_bytes.b[2];
+    CAN_TX_msg.data[4] = angle_to_bytes.b[3];
+    CAN_TX_msg.data[5] = velocity_to_bytes.b[0];
+    CAN_TX_msg.data[6] = velocity_to_bytes.b[1];
+    CAN_TX_msg.data[7] = velocity_to_bytes.b[2];
+    CAN_TX_msg.data[8] = velocity_to_bytes.b[3];
+    CAN_TX_msg.data[9] = 0x00;
+    CAN_TX_msg.data[10] = 0x00;
+    CAN_TX_msg.data[11] = 0x00;
 
     fdcan1.tryToSendReturnStatusFD(CAN_TX_msg);
 
     old_time = millis();
+
+    // PhaseCurrent_s phase_currents = current_sense.getPhaseCurrents();
+
+    // Serial.print("Phase currents: ");
+    // Serial.print(phase_currents.a);
+    // Serial.print(" ");
+    // Serial.print(phase_currents.b);
+    // Serial.print(" ");
+    // Serial.println(phase_currents.c);
   }
 
   // _delay(1);
