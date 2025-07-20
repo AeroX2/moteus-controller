@@ -24,6 +24,99 @@ static CANFDMessage CAN_TX_msg;
 static CANFDMessage CAN_RX_msg;
 static uint32_t id;
 static long update_frequency = 100;
+static uint8_t init_errors = 0;
+
+// Consolidated CAN send function
+void send_can_message(uint8_t message_type, const uint8_t* data, uint8_t data_len = 8) {
+  if (id == 0) return; // Only send if CAN is initialized
+  
+  CAN_TX_msg.id = id;
+  CAN_TX_msg.len = data_len;
+  CAN_TX_msg.ext = true;
+  CAN_TX_msg.type = CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH;
+  
+  CAN_TX_msg.data[0] = message_type;
+  
+  // Copy data to remaining bytes (CAN FD can handle up to 64 bytes)
+  for (int i = 0; i < data_len - 1 && i < 63; i++) {
+    CAN_TX_msg.data[1 + i] = data[i];
+  }
+  
+  // Pad remaining bytes with zeros
+  for (int i = data_len - 1; i < 63; i++) {
+    CAN_TX_msg.data[1 + i] = 0x00;
+  }
+  
+  fdcan1.tryToSendReturnStatusFD(CAN_TX_msg);
+}
+
+// Custom CAN Debug Interface - acts like Serial but sends via CAN
+class CANDebugInterface : public Print {
+private:
+  char message_buffer[64];
+  int buffer_pos = 0;
+  
+public:
+  virtual size_t write(uint8_t c) override {
+    if (c == '\n' || c == '\r') {
+      // Send complete message when we hit newline
+      if (buffer_pos > 0) {
+        message_buffer[buffer_pos] = '\0';
+        send_debug_via_can(message_buffer);
+        buffer_pos = 0;
+      }
+    } else {
+      // Add character to buffer
+      if (buffer_pos < 63) {
+        message_buffer[buffer_pos++] = c;
+      }
+    }
+    return 1;
+  }
+  
+  virtual size_t write(const uint8_t *buffer, size_t size) override {
+    for (size_t i = 0; i < size; i++) {
+      write(buffer[i]);
+    }
+    return size;
+  }
+  
+private:
+  void send_debug_via_can(const char* msg) {
+    if (id == 0) return; // Only send if CAN is initialized
+    
+    // Use full CAN FD capacity (64 bytes)
+    uint8_t debug_data[63] = {0}; // 63 bytes for data + 1 byte for message type
+    
+    // Copy message to debug data
+    int msg_len = strlen(msg);
+    int copy_len = (msg_len > 62) ? 62 : msg_len; // Leave room for null terminator
+    
+    for (int i = 0; i < copy_len; i++) {
+      debug_data[i] = msg[i];
+    }
+    
+    send_can_message(0x04, debug_data, 64);
+  }
+};
+
+// Global CAN debug interface instance
+CANDebugInterface CANDebug;
+
+// CAN Debug function
+void send_can_debug(const __FlashStringHelper* msg, ...) {
+  // Create debug message
+  char debug_buffer[64];
+  strcpy_P(debug_buffer, (const char*)msg);
+  
+  // Pack debug message into bytes (truncate if longer than 7 chars)
+  uint8_t debug_data[7] = {0};
+  for (int i = 0; i < 7 && debug_buffer[i] != '\0'; i++) {
+    debug_data[i] = debug_buffer[i];
+  }
+  
+  send_can_message(0x04, debug_data, 8);
+}
 
 // Commander interface
 Commander command = Commander(Serial);
@@ -44,20 +137,12 @@ void on_status(char* cmd) {
   // Send status through CAN instead of Serial
   STSPIN32G4Status status = driver.status();
   
-  // Use the same CAN ID as other messages
-  CAN_TX_msg.id = id;
-  CAN_TX_msg.len = 8;
-  CAN_TX_msg.ext = true;
-  CAN_TX_msg.type = CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH;
-  
   // Pack status information into 8 bytes:
   // Byte 0: Message type (0x01 for status)
   // Byte 1: Status flags (lock, vcc_uvlo, vds_p, reset, thsd)
   // Byte 2: Driver ready flag
   // Byte 3: Driver fault flag
   // Bytes 4-7: Reserved for future use
-  
-  CAN_TX_msg.data[0] = 0x01; // Message type = status
   
   // Pack status flags into byte 1
   uint8_t status_flags = 0;
@@ -66,18 +151,15 @@ void on_status(char* cmd) {
   if (status.vds_p) status_flags |= 0x04;
   if (status.reset) status_flags |= 0x08;
   if (status.thsd) status_flags |= 0x10;
-  CAN_TX_msg.data[1] = status_flags;
   
-  CAN_TX_msg.data[2] = driver.isReady() ? 0x01 : 0x00;
-  CAN_TX_msg.data[3] = driver.isFault() ? 0x01 : 0x00;
+  uint8_t status_data[7] = {
+    status_flags,
+    driver.isReady() ? 0x01 : 0x00,
+    driver.isFault() ? 0x01 : 0x00,
+    0x00, 0x00, 0x00, 0x00  // Reserved bytes
+  };
   
-  // Reserved bytes
-  CAN_TX_msg.data[4] = 0x00;
-  CAN_TX_msg.data[5] = 0x00;
-  CAN_TX_msg.data[6] = 0x00;
-  CAN_TX_msg.data[7] = 0x00;
-  
-  fdcan1.tryToSendReturnStatusFD(CAN_TX_msg);
+  send_can_message(0x01, status_data, 8);
   
   // Also print to Serial for debugging
   Serial.println("Driver status sent via CAN");
@@ -99,6 +181,19 @@ void on_update_frequency(char* cmd) {
   Serial.print("Setting CAN update frequency to ");
   Serial.print(update_frequency);
   Serial.println("ms");
+}
+
+void on_init_status(char* cmd) {
+  // Send initialization status through CAN
+  uint8_t init_data[7] = {
+    init_errors, // Error flags
+    motor.motor_status,
+    0x00, 0x00, 0x00, 0x00, 0x00  // Reserved bytes
+  };
+  
+  send_can_message(0x03, init_data, 8);
+  
+  Serial.println("Initialization status sent via CAN");
 }
 
 OPAMP_HandleTypeDef hopamp1;
@@ -140,85 +235,6 @@ void setup() {
   Serial.setRx(PA10);
   Serial.setTx(PA9);
   Serial.begin(115200);
-  SimpleFOCDebug::enable(&Serial);
-
-  Serial.println("Initializing CORDIC");
-  if (!SimpleFOC_CORDIC_Config())
-    Serial.println("CORDIC init failed");
-
-  driver.voltage_power_supply = 24.0f;
-  driver.voltage_limit = 24.0f;
-  // driver.pwm_frequency = 40000;
-  // driver.dead_zone = 0.03;
-
-  driver.init();
-  motor.linkDriver(&driver);
-  current_sense.linkDriver(&driver);
-
-  Serial.print("Driver ready: ");
-  Serial.println(driver.isReady() ? "true" : "false");
-  Serial.print("Driver fault: ");
-  Serial.println(driver.isFault() ? "true" : "false");
-
-  // motor init
-  motor.init();
-
-  // Initialise the op amps for the current sensing
-  opamp_init();
-  if (current_sense.init()) {
-    Serial.println("Current sense init success!");
-  } else {
-    Serial.println("Current sense init failed!");
-  }
-  motor.linkCurrentSense(&current_sense);
-
-  // Initialise the magnetic sensor for position sensing
-  magnetic_sensor.init(&spi_class);
-  // motor.sensor_direction = Direction::CW;
-  motor.linkSensor(&magnetic_sensor);
-
-  // Setup motor limits
-  motor.current_limit = 1;
-  // motor.voltage_limit = 0.01;
-  motor.voltage_sensor_align = 1;
-  motor.velocity_limit = 50;
-  motor.torque_controller = TorqueControlType::foc_current;
-  motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
-  motor.controller = MotionControlType::angle;
-  
-  // motor.motion_downsample = 5;
-  // motor.monitor_downsample = 1000;
-  // motor.monitor_variables = _MON_TARGET | _MON_VEL;
-  // motor.useMonitoring(Serial);
-
-  motor.PID_current_q.P = 0.5; 
-  motor.PID_current_q.I = 0; 
-  motor.PID_current_q.D = 0; 
-
-  motor.PID_current_d.P = 0.5;
-  motor.PID_current_d.I = 0;
-  motor.PID_current_d.D = 0;
-
-  motor.LPF_current_q.Tf = 0.01; 
-  motor.LPF_current_d.Tf = 0.01; 
-  
-  motor.LPF_velocity.Tf = 0.01; 
-  motor.LPF_angle.Tf = 0.01; 
-
-  // Align encoder and start FOC
-  delay(100);
-  motor.initFOC();
-
-  // Please don't start, wait for commands
-  motor.disable();
-
-  pinMode(PC2, OUTPUT);
-  command.add('M', on_motor, "motor");
-  command.add('L', on_led, "led control");
-  command.add('T', on_status, "driver status");
-  command.add('R', on_reset, "driver reset");
-  command.add('S', on_stop, "stop");
-  command.add('U', on_update_frequency, "update frequency");
 
   id = HAL_GetUIDw0();
   
@@ -240,6 +256,108 @@ void setup() {
   Serial.print("My CAN ID: 0x");
   Serial.println(id, HEX);
 
+  SimpleFOCDebug::enable(&CANDebug);
+
+  Serial.println("Initializing CORDIC");
+  if (!SimpleFOC_CORDIC_Config()) {
+    Serial.println("CORDIC init failed");
+    init_errors |= 0x01;
+  }
+
+  driver.voltage_power_supply = 24.0f;
+  driver.voltage_limit = 24.0f;
+
+  // Check driver initialization - returns 1 for success, 0 for failure
+  if (driver.init() == 0) {
+    Serial.println("Driver init failed!");
+    init_errors |= 0x02;
+  } else {
+    Serial.println("Driver init success!");
+  }
+  
+  motor.linkDriver(&driver);
+  current_sense.linkDriver(&driver);
+
+  Serial.print("Driver fault: ");
+  Serial.println(driver.isFault() ? "true" : "false");
+  
+  // Additional driver status check
+  if (driver.isFault()) {
+    init_errors |= 0x02;
+  }
+
+  // motor init - returns 1 for success, 0 for failure
+  if (motor.init() == 0) {
+    Serial.println("Motor init failed!");
+    init_errors |= 0x08;
+  } else {
+    Serial.println("Motor init success!");
+  }
+
+  // Initialise the op amps for the current sensing
+  opamp_init();
+  if (current_sense.init()) {
+    Serial.println("Current sense init success!");
+  } else {
+    Serial.println("Current sense init failed!");
+    init_errors |= 0x04;
+  }
+  motor.linkCurrentSense(&current_sense);
+
+  // Initialise the magnetic sensor for position sensing
+  magnetic_sensor.init(&spi_class);
+  motor.linkSensor(&magnetic_sensor);
+
+  // Setup motor limits
+  motor.current_limit = 1;
+  motor.voltage_sensor_align = 1;
+  motor.velocity_limit = 50;
+  motor.torque_controller = TorqueControlType::foc_current;
+  motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
+  motor.controller = MotionControlType::angle;
+
+  motor.PID_current_q.P = 0.5; 
+  motor.PID_current_q.I = 0; 
+  motor.PID_current_q.D = 0; 
+
+  motor.PID_current_d.P = 0.5;
+  motor.PID_current_d.I = 0;
+  motor.PID_current_d.D = 0;
+
+  motor.LPF_current_q.Tf = 0.01; 
+  motor.LPF_current_d.Tf = 0.01; 
+  
+  motor.LPF_velocity.Tf = 0.01; 
+  motor.LPF_angle.Tf = 0.01; 
+
+  // Align encoder and start FOC - returns 1 for success, 0 for failure
+  delay(100);
+  if (motor.initFOC() == 0) {
+    Serial.println("Motor FOC init failed!");
+    init_errors |= 0x10;
+  } else {
+    Serial.println("Motor FOC init success!");
+  }
+
+  // Please don't start, wait for commands
+  motor.disable();
+
+  pinMode(PC2, OUTPUT);
+  command.add('M', on_motor, "motor");
+  command.add('L', on_led, "led control");
+  command.add('T', on_status, "driver status");
+  command.add('R', on_reset, "driver reset");
+  command.add('S', on_stop, "stop");
+  command.add('U', on_update_frequency, "update frequency");
+  command.add('I', on_init_status, "init status");
+  // Send final initialization status
+  if (init_errors == 0) {
+    Serial.println("All components initialized successfully!");
+  } else {
+    Serial.print("Initialization completed with errors: 0x");
+    Serial.println(init_errors, HEX);
+  }
+
   Serial.println("SimpleFOC ready!");
 
   _delay(1000);
@@ -252,7 +370,6 @@ void loop() {
   motor.move();
 
   command.run();
-  // motor.monitor();
 
   if (fdcan1.receiveFD0(CAN_RX_msg)) {
     Serial.println((char*)CAN_RX_msg.data);
@@ -276,38 +393,16 @@ void loop() {
     velocity_to_bytes.f = velocity;
 
     // Message type: 0x00 = angle/velocity data
-    CAN_TX_msg.id = id; // Standard ID for angle/velocity (no type bits)
-    CAN_TX_msg.len = 12;
-    CAN_TX_msg.ext = true;
-    CAN_TX_msg.type = CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH;
-    CAN_TX_msg.data[0] = 0x00; // Message type = angle/velocity
-    CAN_TX_msg.data[1] = angle_to_bytes.b[0];
-    CAN_TX_msg.data[2] = angle_to_bytes.b[1];
-    CAN_TX_msg.data[3] = angle_to_bytes.b[2];
-    CAN_TX_msg.data[4] = angle_to_bytes.b[3];
-    CAN_TX_msg.data[5] = velocity_to_bytes.b[0];
-    CAN_TX_msg.data[6] = velocity_to_bytes.b[1];
-    CAN_TX_msg.data[7] = velocity_to_bytes.b[2];
-    CAN_TX_msg.data[8] = velocity_to_bytes.b[3];
-    CAN_TX_msg.data[9] = 0x00;
-    CAN_TX_msg.data[10] = 0x00;
-    CAN_TX_msg.data[11] = 0x00;
+    uint8_t motion_data[11] = {
+      angle_to_bytes.b[0], angle_to_bytes.b[1], angle_to_bytes.b[2], angle_to_bytes.b[3],
+      velocity_to_bytes.b[0], velocity_to_bytes.b[1], velocity_to_bytes.b[2], velocity_to_bytes.b[3],
+      0x00, 0x00, 0x00
+    };
 
-    fdcan1.tryToSendReturnStatusFD(CAN_TX_msg);
+    send_can_message(0x00, motion_data, 12);
 
     old_time = millis();
-
-    // PhaseCurrent_s phase_currents = current_sense.getPhaseCurrents();
-
-    // Serial.print("Phase currents: ");
-    // Serial.print(phase_currents.a);
-    // Serial.print(" ");
-    // Serial.print(phase_currents.b);
-    // Serial.print(" ");
-    // Serial.println(phase_currents.c);
   }
-
-  // _delay(1);
 }
 
 void SystemClock_Config(void) {

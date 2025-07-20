@@ -32,6 +32,8 @@ def getch():
                 return '\b'
             elif char == b'\x03':  # Ctrl+C
                 return '\x03'
+            elif char == b'\t':  # Tab key
+                return '\t'
             elif len(char) == 1 and 32 <= ord(char) <= 126:  # Printable ASCII
                 return char.decode('utf-8')
     except ImportError:
@@ -45,6 +47,8 @@ def getch():
                 return '\b'
             elif char == '\x03':  # Ctrl+C
                 return '\x03'
+            elif char == '\t':  # Tab key
+                return '\t'
             return char
     return None
 
@@ -62,11 +66,23 @@ class CANMonitor:
         self.current_command = ""
         self.selected_device_index = 0
         self.pending_status_requests = set()  # Track devices we've sent status commands to
+        self.message_count = 0  # Counter for real-time messages
+        self.last_message_time = time.time()  # Track message timing
         
     def connect(self):
         """Connect to the serial port"""
         try:
-            self.ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
+            # Optimize for real-time performance
+            self.ser = serial.Serial(
+                self.port, 
+                self.baudrate, 
+                timeout=0.001,  # Much shorter timeout for faster response
+                write_timeout=0.1,
+                inter_byte_timeout=None,  # Disable inter-byte timeout
+                exclusive=True  # Exclusive access for better performance
+            )
+            # Set buffer sizes for better performance
+            self.ser.set_buffer_size(rx_size=8192, tx_size=8192)
             self.add_message(f"[green]Connected to {self.port} at {self.baudrate} baud[/green]")
             return True
         except serial.SerialException as e:
@@ -144,6 +160,58 @@ class CANMonitor:
                             
                             return can_id, None, None, 'status'
                             
+
+                            
+                    elif message_type == 0x03:
+                        # Initialization status message
+                        if len(data_bytes) >= 3:
+                            error_flags = data_bytes[1]
+                            motor_status = data_bytes[2]
+                            
+                            error_list = []
+                            if error_flags & 0x01:
+                                error_list.append("CORDIC")
+                            if error_flags & 0x02:
+                                error_list.append("DRIVER")
+                            if error_flags & 0x04:
+                                error_list.append("CURRENT")
+                            if error_flags & 0x08:
+                                error_list.append("MOTOR")
+                            if error_flags & 0x10:
+                                error_list.append("FOC")
+                            
+                            # Interpret motor status
+                            motor_status_names = {
+                                0x00: "UNINITIALIZED",
+                                0x01: "INITIALIZING", 
+                                0x02: "UNCALIBRATED",
+                                0x03: "CALIBRATING",
+                                0x04: "READY",
+                                0x08: "ERROR",
+                                0x0E: "CALIB_FAILED",
+                                0x0F: "INIT_FAILED"
+                            }
+                            motor_status_name = motor_status_names.get(motor_status, f"UNKNOWN({motor_status:02X})")
+                            
+                            if error_flags == 0 and motor_status == 0x04:
+                                self.add_message(f"[green]CAN {can_id}[/green]: All components initialized successfully, motor READY")
+                            elif error_flags == 0:
+                                self.add_message(f"[yellow]CAN {can_id}[/yellow]: Components OK, motor status: {motor_status_name}")
+                            else:
+                                self.add_message(f"[yellow]CAN {can_id}[/yellow]: Init errors: {', '.join(error_list)} (0x{error_flags:02X}), motor: {motor_status_name}")
+                            
+                            return can_id, None, None, 'init_status'
+                            
+                    elif message_type == 0x04:
+                        # Debug message - now supports up to 63 bytes of debug data
+                        if len(data_bytes) >= 2:
+                            # Extract debug message from bytes 1 onwards (up to 63 bytes)
+                            debug_data = data_bytes[1:]
+                            debug_msg = debug_data.decode('ascii', errors='ignore').rstrip('\x00')
+                            if debug_msg.strip():  # Only show non-empty messages
+                                self.add_message(f"[blue]CAN {can_id}[/blue]: DEBUG: {debug_msg}")
+                            return can_id, None, None, 'debug'
+                    
                     elif message_type == 0x00:
                         # Motion message (angle/velocity)
                         if len(data_bytes) >= 9:
@@ -182,17 +250,31 @@ class CANMonitor:
                     if line.strip():
                         can_id, angle, velocity, msg_type = self.parse_message(line)
                         if can_id:
+                            # Update message counter and timing
+                            self.message_count += 1
+                            current_time = time.time()
+                            time_since_last = current_time - self.last_message_time
+                            self.last_message_time = current_time
+                            
                             if msg_type == 'motion':
-                                # self.add_message(f"[cyan]CAN {can_id}[/cyan]: Angle={angle:.3f}° Velocity={velocity:.3f}°/s")
+                                # Motion messages are handled silently for performance
+                                # but we could add a counter for debugging
                                 pass
                             elif msg_type == 'status':
                                 status_info = self.devices[can_id]['status']
                                 self.add_message(f"[cyan]CAN {can_id}[/cyan]: Status: Lock={status_info['lock']}, VCC={status_info['vcc_uvlo']}, VDS={status_info['vds_p']}, Reset={status_info['reset']}, THSD={status_info['thsd']}, Ready={status_info['ready']}, Fault={status_info['fault']}")
-                        else:
-                            # Show other serial output
-                            self.add_message(f"[white]Serial:[/white] {line.strip()}")
+                            elif msg_type == 'init_status':
+                                # This is already handled in parse_message
+                                pass
+                            elif msg_type == 'debug':
+                                # Debug messages are handled silently for performance
+                                pass
+                            else:
+                                # Show other serial output
+                                self.add_message(f"[white]Serial:[/white] {line.strip()}")
                 
-                time.sleep(0.01)  # Small delay to prevent high CPU usage
+                # Reduced sleep time for faster response
+                time.sleep(0.001)  # 1ms instead of 10ms
                 
             except Exception as e:
                 self.add_message(f"[red]Error in monitor loop: {e}[/red]")
@@ -242,6 +324,13 @@ class CANMonitor:
         """Update the layout with current data"""
         # Messages panel
         messages_text = Text()
+        
+        # Add real-time statistics
+        if self.message_count > 0:
+            current_time = time.time()
+            time_since_last = current_time - self.last_message_time
+            messages_text.append_text(Text.from_markup(f"[dim]Messages: {self.message_count} | Last: {time_since_last:.3f}s ago[/dim]\n"))
+        
         for msg in list(self.messages)[-20:]:  # Show last 20 messages for smaller terminals
             messages_text.append_text(Text.from_markup(msg + "\n"))
         
@@ -339,7 +428,7 @@ class CANMonitor:
             if self.selected_device_index < len(device_list):
                 selected_device = device_list[self.selected_device_index]
         
-        cmd_markup = f"[bold]Commands:[/bold] [yellow]<cmd>[/yellow] [dim]|[/dim] [yellow]tab[/yellow] [dim]|[/dim] [yellow]quit[/yellow] [dim]| Selected:[/dim] [cyan]{selected_device}[/cyan]\n[bold green]>[/bold green] [white]{self.current_command}[/white][dim]_[/dim]"
+        cmd_markup = f"[bold]Commands:[/bold] [yellow]<cmd>[/yellow] [dim]|[/dim] [yellow]tab[/yellow] [dim]|[/dim] [yellow]stats[/yellow] [dim]|[/dim] [yellow]quit[/yellow] [dim]| Selected:[/dim] [cyan]{selected_device}[/cyan]\n[bold green]>[/bold green] [white]{self.current_command}[/white][dim]_[/dim]"
         cmd_text = Text.from_markup(cmd_markup)
         
         layout["command"].update(
@@ -361,10 +450,15 @@ class CANMonitor:
         
         if cmd.lower() == 'quit' or cmd.lower() == 'exit':
             self.running = False
+        elif cmd.lower() == 'stats':
+            # Show real-time statistics
+            current_time = time.time()
+            time_since_last = current_time - self.last_message_time
+            self.add_message(f"[cyan]Real-time Stats:[/cyan] Messages: {self.message_count} | Last message: {time_since_last:.3f}s ago | Devices: {len(self.devices)}")
         elif cmd.lower() == 'list':
             self.add_message("[yellow]Device list updated in sidebar[/yellow]")
         elif cmd.lower() == 'help':
-            self.add_message("[yellow]Commands: <command> (send to selected device), tab (cycle devices), quit[/yellow]")
+            self.add_message("[yellow]Commands: <command> (send to selected device), tab (cycle devices), stats (show statistics), quit[/yellow]")
         else:
             # Send command to selected device
             if self.devices:
