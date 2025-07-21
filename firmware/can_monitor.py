@@ -34,6 +34,17 @@ def getch():
                 return '\x03'
             elif char == b'\t':  # Tab key
                 return '\t'
+            elif char == b'\xe0':  # Arrow key prefix
+                # Read the next byte to determine which arrow key
+                next_char = msvcrt.getch()
+                if next_char == b'H':  # Up arrow
+                    return 'UP'
+                elif next_char == b'P':  # Down arrow
+                    return 'DOWN'
+                elif next_char == b'K':  # Left arrow
+                    return 'LEFT'
+                elif next_char == b'M':  # Right arrow
+                    return 'RIGHT'
             elif len(char) == 1 and 32 <= ord(char) <= 126:  # Printable ASCII
                 return char.decode('utf-8')
     except ImportError:
@@ -49,6 +60,21 @@ def getch():
                 return '\x03'
             elif char == '\t':  # Tab key
                 return '\t'
+            elif char == '\x1b':  # ESC sequence
+                # Check for arrow keys
+                if select.select([sys.stdin], [], [], 0.01) == ([sys.stdin], [], []):
+                    next_char = sys.stdin.read(1)
+                    if next_char == '[':
+                        if select.select([sys.stdin], [], [], 0.01) == ([sys.stdin], [], []):
+                            arrow_char = sys.stdin.read(1)
+                            if arrow_char == 'A':  # Up arrow
+                                return 'UP'
+                            elif arrow_char == 'B':  # Down arrow
+                                return 'DOWN'
+                            elif arrow_char == 'C':  # Right arrow
+                                return 'RIGHT'
+                            elif arrow_char == 'D':  # Left arrow
+                                return 'LEFT'
             return char
     return None
 
@@ -68,6 +94,11 @@ class CANMonitor:
         self.pending_status_requests = set()  # Track devices we've sent status commands to
         self.message_count = 0  # Counter for real-time messages
         self.last_message_time = time.time()  # Track message timing
+        
+        # Scroll tracking
+        self.scroll_position = 0  # Current scroll position (0 = bottom, positive = scroll up)
+        self.auto_scroll = True  # Whether to auto-scroll to bottom
+        self.messages_per_page = 15  # Number of messages to show per page
         
     def connect(self):
         """Connect to the serial port"""
@@ -100,6 +131,10 @@ class CANMonitor:
         """Add a timestamped message to the display"""
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         self.messages.append(f"[dim]{timestamp}[/dim] {message}")
+        
+        # Auto-scroll to bottom when new messages arrive
+        if self.auto_scroll:
+            self.scroll_position = 0
     
     def parse_message(self, line):
         """Parse CAN message line like: rcv 56004D 99C4734000000000 E B F r f-1"""
@@ -290,8 +325,8 @@ class CANMonitor:
             # Convert ASCII command to hex
             hex_data = command.encode('utf-8').hex().upper() + '00'
             
-            # Format as CAN command: "can std id hex f"
-            can_command = f"can std {target_id} {hex_data} f\n"
+            # Format as CAN command: "can send id hex Fb"
+            can_command = f"can send {target_id} {hex_data} Fb\n"
             
             self.ser.write(can_command.encode())
             self.add_message(f"[green]Sent to {target_id}:[/green] '{command}' [dim](hex: {hex_data})[/dim]")
@@ -331,8 +366,33 @@ class CANMonitor:
             time_since_last = current_time - self.last_message_time
             messages_text.append_text(Text.from_markup(f"[dim]Messages: {self.message_count} | Last: {time_since_last:.3f}s ago[/dim]\n"))
         
-        for msg in list(self.messages)[-20:]:  # Show last 20 messages for smaller terminals
-            messages_text.append_text(Text.from_markup(msg + "\n"))
+        # Calculate scroll window
+        total_messages = len(self.messages)
+        if total_messages > 0:
+            # Ensure scroll position is valid
+            max_scroll = max(0, total_messages - self.messages_per_page)
+            self.scroll_position = min(self.scroll_position, max_scroll)
+            self.scroll_position = max(0, self.scroll_position)
+            
+            # Get the window of messages to display
+            start_idx = max(0, total_messages - self.messages_per_page - self.scroll_position)
+            end_idx = total_messages - self.scroll_position
+            
+            # Add scroll indicator
+            if total_messages > self.messages_per_page:
+                if self.scroll_position == 0:
+                    messages_text.append_text(Text.from_markup(f"[dim]▼ Showing latest {self.messages_per_page} messages[/dim]\n"))
+                elif self.scroll_position >= max_scroll:
+                    messages_text.append_text(Text.from_markup(f"[dim]▲ Showing oldest {self.messages_per_page} messages[/dim]\n"))
+                else:
+                    messages_text.append_text(Text.from_markup(f"[dim]▲▼ Showing messages {start_idx+1}-{end_idx} of {total_messages}[/dim]\n"))
+            
+            # Display the message window
+            for i in range(start_idx, end_idx):
+                if i < len(self.messages):
+                    messages_text.append_text(Text.from_markup(self.messages[i] + "\n"))
+        else:
+            messages_text.append_text(Text.from_markup("[dim]No messages yet[/dim]"))
         
         layout["messages"].update(
             Panel(
@@ -428,7 +488,7 @@ class CANMonitor:
             if self.selected_device_index < len(device_list):
                 selected_device = device_list[self.selected_device_index]
         
-        cmd_markup = f"[bold]Commands:[/bold] [yellow]<cmd>[/yellow] [dim]|[/dim] [yellow]tab[/yellow] [dim]|[/dim] [yellow]stats[/yellow] [dim]|[/dim] [yellow]quit[/yellow] [dim]| Selected:[/dim] [cyan]{selected_device}[/cyan]\n[bold green]>[/bold green] [white]{self.current_command}[/white][dim]_[/dim]"
+        cmd_markup = f"[bold]Commands:[/bold] [yellow]<cmd>[/yellow] [dim]|[/dim] [yellow]tab[/yellow] [dim]|[/dim] [yellow]↑↓[/yellow] [dim]|[/dim] [yellow]home[/yellow] [dim]|[/dim] [yellow]stats[/yellow] [dim]|[/dim] [yellow]quit[/yellow] [dim]| Selected:[/dim] [cyan]{selected_device}[/cyan]\n[bold green]>[/bold green] [white]{self.current_command}[/white][dim]_[/dim]"
         cmd_text = Text.from_markup(cmd_markup)
         
         layout["command"].update(
@@ -458,7 +518,11 @@ class CANMonitor:
         elif cmd.lower() == 'list':
             self.add_message("[yellow]Device list updated in sidebar[/yellow]")
         elif cmd.lower() == 'help':
-            self.add_message("[yellow]Commands: <command> (send to selected device), tab (cycle devices), stats (show statistics), quit[/yellow]")
+            self.add_message("[yellow]Commands: <command> (send to selected device), tab (cycle devices), ↑↓ (scroll messages), home (reset scroll), stats (show statistics), quit[/yellow]")
+        elif cmd.lower() == 'home':
+            self.scroll_position = 0
+            self.auto_scroll = True
+            self.add_message("[green]Reset scroll position to latest messages[/green]")
         else:
             # Send command to selected device
             if self.devices:
@@ -494,6 +558,15 @@ class CANMonitor:
                         elif char == '\t':  # Tab key - cycle through devices
                             if self.devices:
                                 self.selected_device_index = (self.selected_device_index + 1) % len(self.devices)
+                        elif char == 'UP':  # Up arrow - scroll up in messages
+                            if len(self.messages) > self.messages_per_page:
+                                self.scroll_position = min(self.scroll_position + 1, len(self.messages) - self.messages_per_page)
+                                self.auto_scroll = False  # Disable auto-scroll when manually scrolling
+                        elif char == 'DOWN':  # Down arrow - scroll down in messages
+                            if self.scroll_position > 0:
+                                self.scroll_position = max(0, self.scroll_position - 1)
+                            if self.scroll_position == 0:
+                                self.auto_scroll = True  # Re-enable auto-scroll when at bottom
                         elif char == '\x03':  # Ctrl+C
                             break
                         elif char and 32 <= ord(char) <= 126:  # Printable ASCII
@@ -519,7 +592,7 @@ def main():
         monitor_thread.start()
         
         monitor.add_message("[green]CAN Monitor started. Type commands below.[/green]")
-        monitor.add_message("[yellow]Commands: <command> (sent to selected device), tab (cycle devices), quit[/yellow]")
+        monitor.add_message("[yellow]Commands: <command> (sent to selected device), tab (cycle devices), ↑↓ (scroll messages), home (reset scroll), quit[/yellow]")
         
         # Run the TUI
         monitor.run_tui()

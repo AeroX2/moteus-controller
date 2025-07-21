@@ -33,7 +33,7 @@ void send_can_message(uint8_t message_type, const uint8_t* data, uint8_t data_le
   CAN_TX_msg.id = id;
   CAN_TX_msg.len = data_len;
   CAN_TX_msg.ext = true;
-  CAN_TX_msg.type = CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH;
+  CAN_TX_msg.type = CANFDMessage::CANFD_NO_BIT_RATE_SWITCH;
   
   CAN_TX_msg.data[0] = message_type;
   
@@ -118,8 +118,34 @@ void send_can_debug(const __FlashStringHelper* msg, ...) {
   send_can_message(0x04, debug_data, 8);
 }
 
+// CAN Debug Stream wrapper - makes CANDebugInterface compatible with Stream
+class CANDebugStream : public Stream {
+private:
+  CANDebugInterface* can_debug;
+  
+public:
+  CANDebugStream(CANDebugInterface* debug) : can_debug(debug) {}
+  
+  // Stream interface methods
+  int available() override { return 0; } // No input available
+  int read() override { return -1; } // No input
+  int peek() override { return -1; } // No input
+  
+  // Print interface methods (inherited from Print)
+  size_t write(uint8_t c) override {
+    if (can_debug) return can_debug->write(c);
+    return 0;
+  }
+  
+  size_t write(const uint8_t *buffer, size_t size) override {
+    if (can_debug) return can_debug->write(buffer, size);
+    return 0;
+  }
+};
+
 // Commander interface
-Commander command = Commander(Serial);
+CANDebugStream can_stream(&CANDebug);
+Commander command = Commander(can_stream);
 
 void on_stop(char* cmd) {
   motor.disable();
@@ -244,8 +270,12 @@ void setup() {
   ACANFD_STM32_StandardFilters standardFilters;
   standardFilters.addSingle(id, ACANFD_STM32_FilterAction::FIFO0);
   settings.mNonMatchingStandardFrameReception = ACANFD_STM32_FilterAction::REJECT;
+
+  ACANFD_STM32_ExtendedFilters extendedFilters;
+  extendedFilters.addSingle(id, ACANFD_STM32_FilterAction::FIFO0);
+  settings.mNonMatchingExtendedFrameReception = ACANFD_STM32_FilterAction::REJECT;
   
-  const uint32_t errorCode = fdcan1.beginFD(settings, standardFilters);
+  const uint32_t errorCode = fdcan1.beginFD(settings, standardFilters, extendedFilters);
   if (errorCode == 0) {
     Serial.println("CANFD configuration OK");
   } else {
@@ -308,10 +338,14 @@ void setup() {
   magnetic_sensor.init(&spi_class);
   motor.linkSensor(&magnetic_sensor);
 
+  motor.monitor_downsample = 0;
+  motor.monitor_variables = 0;
+  motor.useMonitoring(CANDebug);
+
   // Setup motor limits
-  motor.current_limit = 1;
-  motor.voltage_sensor_align = 1;
-  motor.velocity_limit = 50;
+  motor.current_limit = 0.4;
+  motor.voltage_sensor_align = 1.0;
+  motor.velocity_limit = 50.0;
   motor.torque_controller = TorqueControlType::foc_current;
   motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
   motor.controller = MotionControlType::angle;
@@ -368,6 +402,7 @@ long old_time = 0;
 void loop() {
   motor.loopFOC();
   motor.move();
+  motor.monitor();
 
   command.run();
 
