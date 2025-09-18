@@ -98,7 +98,7 @@ class CANMonitor:
         # Scroll tracking
         self.scroll_position = 0  # Current scroll position (0 = bottom, positive = scroll up)
         self.auto_scroll = True  # Whether to auto-scroll to bottom
-        self.messages_per_page = 15  # Number of messages to show per page
+        self.messages_per_page = 15  # Default, will be updated dynamically based on panel height
         
     def connect(self):
         """Connect to the serial port"""
@@ -357,6 +357,25 @@ class CANMonitor:
     
     def update_layout(self, layout):
         """Update the layout with current data"""
+        # Calculate dynamic messages per page based on available panel height
+        try:
+            # Get the console size to calculate available space
+            console_height = self.console.size.height
+            
+            # Account for layout structure:
+            # - devices panel takes 8 lines
+            # - command panel takes 4 lines  
+            # - panel borders and padding take about 3 lines
+            # - stats line takes 1 line
+            available_height = console_height - 8 - 4 - 3 - 1
+            
+            # Ensure minimum of 5 messages and maximum of 50
+            self.messages_per_page = max(5, min(50, available_height))
+            
+        except Exception:
+            # Fallback to default if we can't get console size
+            self.messages_per_page = 15
+        
         # Messages panel
         messages_text = Text()
         
@@ -430,7 +449,7 @@ class CANMonitor:
                 
                 # Add motion data if available
                 if 'angle' in info and info['angle'] is not None and 'velocity' in info and info['velocity'] is not None:
-                    motion_part = f"[white]{info['angle']:+4.1f}°[/white] [white]{info['velocity']:+4.1f}°/s[/white]"
+                    motion_part = f"[white]{info['angle']:+4.3f}°[/white] [white]{info['velocity']:+4.1f}°/s[/white]"
                 
                 # Add status data if available
                 if 'status' in info and info['status'] is not None:

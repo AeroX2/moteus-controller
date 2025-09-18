@@ -3,7 +3,7 @@
 #include "SimpleFOC.h"
 #include "SimpleFOCDrivers.h"
 #include "drivers/stspin32g4/STSPIN32G4.h"
-// #include "stm32g4xx_hal_opamp.h"
+#include "stm32g4xx_hal_opamp.h"
 #include "utilities/stm32math/STM32G4CORDICTrigFunctions.h"
 #include "ACANFD_STM32.h"
 
@@ -26,27 +26,40 @@ static uint32_t id;
 static long update_frequency = 100;
 static uint8_t init_errors = 0;
 
-// Consolidated CAN send function
+// Consolidated CAN send function with internal CAN FD DLC rounding
 void send_can_message(uint8_t message_type, const uint8_t* data, uint8_t data_len = 8) {
   if (id == 0) return; // Only send if CAN is initialized
-  
+
+  // Ensure at least room for message_type
+  if (data_len == 0) data_len = 1;
+  // Round to valid CAN FD payload size
+  auto round_dlc = [](uint8_t n)->uint8_t {
+    if (n <= 8)  return n;      // 0..8 contiguous
+    if (n <= 12) return 12;
+    if (n <= 16) return 16;
+    if (n <= 20) return 20;
+    if (n <= 24) return 24;
+    if (n <= 32) return 32;
+    if (n <= 48) return 48;
+    return 64;
+  };
+  uint8_t dlc = round_dlc(data_len);
+
   CAN_TX_msg.id = id;
-  CAN_TX_msg.len = data_len;
+  CAN_TX_msg.len = dlc;
   CAN_TX_msg.ext = true;
   CAN_TX_msg.type = CANFDMessage::CANFD_NO_BIT_RATE_SWITCH;
-  
   CAN_TX_msg.data[0] = message_type;
-  
-  // Copy data to remaining bytes (CAN FD can handle up to 64 bytes)
-  for (int i = 0; i < data_len - 1 && i < 63; i++) {
+
+  int copy_bytes = (data_len > 1) ? (data_len - 1) : 0;
+  if (copy_bytes > 63) copy_bytes = 63;
+  for (int i = 0; i < copy_bytes; i++) {
     CAN_TX_msg.data[1 + i] = data[i];
   }
-  
-  // Pad remaining bytes with zeros
-  for (int i = data_len - 1; i < 63; i++) {
+  // Pad remaining bytes up to dlc-1
+  for (int i = copy_bytes; i < (dlc - 1); i++) {
     CAN_TX_msg.data[1 + i] = 0x00;
   }
-  
   fdcan1.tryToSendReturnStatusFD(CAN_TX_msg);
 }
 
@@ -57,19 +70,35 @@ private:
   int buffer_pos = 0;
   
 public:
+  void send_string(const char* msg) {
+    if (id == 0 || msg == nullptr) return;
+    size_t total = strlen(msg);
+    size_t offset = 0;
+    while (offset < total) {
+      size_t chunk = total - offset;
+      if (chunk > 63) chunk = 63; // max per frame (excluding message type)
+      uint8_t frame[63] = {0};
+      if (chunk) memcpy(frame, msg + offset, chunk);
+      send_can_message(0x04, frame, static_cast<uint8_t>(chunk + 1));
+      offset += chunk;
+    }
+  }
+
   virtual size_t write(uint8_t c) override {
     if (c == '\n' || c == '\r') {
-      // Send complete message when we hit newline
       if (buffer_pos > 0) {
         message_buffer[buffer_pos] = '\0';
-        send_debug_via_can(message_buffer);
+        send_string(message_buffer);
         buffer_pos = 0;
       }
     } else {
-      // Add character to buffer
-      if (buffer_pos < 63) {
-        message_buffer[buffer_pos++] = c;
+      if (buffer_pos >= 63) {
+        // buffer full - send chunk and start new line continuation
+        message_buffer[63-1] = '\0';
+        send_string(message_buffer);
+        buffer_pos = 0;
       }
+      message_buffer[buffer_pos++] = c;
     }
     return 1;
   }
@@ -80,43 +109,18 @@ public:
     }
     return size;
   }
-  
-private:
-  void send_debug_via_can(const char* msg) {
-    if (id == 0) return; // Only send if CAN is initialized
-    
-    // Use full CAN FD capacity (64 bytes)
-    uint8_t debug_data[63] = {0}; // 63 bytes for data + 1 byte for message type
-    
-    // Copy message to debug data
-    int msg_len = strlen(msg);
-    int copy_len = (msg_len > 62) ? 62 : msg_len; // Leave room for null terminator
-    
-    for (int i = 0; i < copy_len; i++) {
-      debug_data[i] = msg[i];
+
+  void flush_buffer() {
+    if (buffer_pos > 0) {
+      message_buffer[buffer_pos] = '\0';
+      send_string(message_buffer);
+      buffer_pos = 0;
     }
-    
-    send_can_message(0x04, debug_data, 64);
   }
 };
 
 // Global CAN debug interface instance
 CANDebugInterface CANDebug;
-
-// CAN Debug function
-void send_can_debug(const __FlashStringHelper* msg, ...) {
-  // Create debug message
-  char debug_buffer[64];
-  strcpy_P(debug_buffer, (const char*)msg);
-  
-  // Pack debug message into bytes (truncate if longer than 7 chars)
-  uint8_t debug_data[7] = {0};
-  for (int i = 0; i < 7 && debug_buffer[i] != '\0'; i++) {
-    debug_data[i] = debug_buffer[i];
-  }
-  
-  send_can_message(0x04, debug_data, 8);
-}
 
 // CAN Debug Stream wrapper - makes CANDebugInterface compatible with Stream
 class CANDebugStream : public Stream {
@@ -231,18 +235,22 @@ void opamp_init(void) {
   hopamp1.Init.Mode = OPAMP_STANDALONE_MODE;
   hopamp1.Init.InvertingInput = OPAMP_INVERTINGINPUT_IO0;
   hopamp1.Init.NonInvertingInput = OPAMP_NONINVERTINGINPUT_IO0;
-  hopamp1.Init.InternalOutput = DISABLE;
+  // hopamp1.Init.InternalOutput = ENABLE;
   hopamp1.Init.TimerControlledMuxmode = OPAMP_TIMERCONTROLLEDMUXMODE_DISABLE;
   hopamp1.Init.UserTrimming = OPAMP_TRIMMING_FACTORY;
+  hopamp1.Init.PgaConnect = OPAMP_PGA_CONNECT_INVERTINGINPUT_NO;
+  hopamp1.Init.PgaGain = OPAMP_PGA_GAIN_32_OR_MINUS_31;
 
   hopamp3.Instance = OPAMP3;
   hopamp3.Init.PowerMode = OPAMP_POWERMODE_NORMALSPEED;
   hopamp3.Init.Mode = OPAMP_STANDALONE_MODE;
   hopamp3.Init.InvertingInput = OPAMP_INVERTINGINPUT_IO0;
   hopamp3.Init.NonInvertingInput = OPAMP_NONINVERTINGINPUT_IO0;
-  hopamp3.Init.InternalOutput = DISABLE;
+  // hopamp3.Init.InternalOutput = ENABLE;
   hopamp3.Init.TimerControlledMuxmode = OPAMP_TIMERCONTROLLEDMUXMODE_DISABLE;
   hopamp3.Init.UserTrimming = OPAMP_TRIMMING_FACTORY;
+  // hopamp3.Init.PgaConnect = OPAMP_PGA_CONNECT_INVERTINGINPUT_NO;
+  // hopamp3.Init.PgaGain = OPAMP_PGA_GAIN_32_OR_MINUS_31;
 
   if (
       HAL_OPAMP_Init(&hopamp1) != HAL_OK ||
@@ -258,9 +266,11 @@ void opamp_init(void) {
 }
 
 void setup() {
+  #ifndef CAN_DEBUG
   Serial.setRx(PA10);
   Serial.setTx(PA9);
   Serial.begin(115200);
+  #endif
 
   id = HAL_GetUIDw0();
   
@@ -336,6 +346,7 @@ void setup() {
 
   // Initialise the magnetic sensor for position sensing
   magnetic_sensor.init(&spi_class);
+  magnetic_sensor.min_elapsed_time = 0.00075;
   motor.linkSensor(&magnetic_sensor);
 
   motor.monitor_downsample = 0;
@@ -343,7 +354,7 @@ void setup() {
   motor.useMonitoring(CANDebug);
 
   // Setup motor limits
-  motor.current_limit = 0.4;
+  motor.current_limit = 1.0;
   motor.voltage_sensor_align = 1.0;
   motor.velocity_limit = 50.0;
   motor.torque_controller = TorqueControlType::foc_current;
