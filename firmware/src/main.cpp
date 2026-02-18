@@ -13,7 +13,7 @@ SPIClass spi_class(PB5, PB4, PB3);
 
 // Low side current sense sensor 
 // (gain values comes from B-G431B-ESC1, multiplied by 10 because that is what worked)
-LowsideCurrentSense current_sense = LowsideCurrentSense(0.01f, -64.0f / 7.0f * 10.0f, PA2, PB1, _NC);
+LowsideCurrentSense current_sense = LowsideCurrentSense(0.01f, -64.0f / 7.0f * 10.0f, PB1, _NC, PA2);
 
 // BLDC motor & driver instance
 STSPIN32G4 driver = STSPIN32G4();
@@ -166,35 +166,32 @@ void on_led(char* cmd) {
 }
 
 void on_status(char* cmd) {
-  // Send status through CAN instead of Serial
   STSPIN32G4Status status = driver.status();
+  STSPIN32G4NFault nfault = driver.getNFaultRegister();
+  STSPIN32G4Ready ready = driver.getReadyRegister();
   
-  // Pack status information into 8 bytes:
-  // Byte 0: Message type (0x01 for status)
+  // Pack status information into extended telemetry:
   // Byte 1: Status flags (lock, vcc_uvlo, vds_p, reset, thsd)
-  // Byte 2: Driver ready flag
-  // Byte 3: Driver fault flag
-  // Bytes 4-7: Reserved for future use
-  
-  // Pack status flags into byte 1
-  uint8_t status_flags = 0;
-  if (status.lock) status_flags |= 0x01;
-  if (status.vcc_uvlo) status_flags |= 0x02;
-  if (status.vds_p) status_flags |= 0x04;
-  if (status.reset) status_flags |= 0x08;
-  if (status.thsd) status_flags |= 0x10;
+  // Byte 2: Driver ready (HW pin)
+  // Byte 3: Driver fault (HW pin)
+  // Byte 4: NFault Register (vcc_uvlo_flt, thsd_flt, vds_p_flt)
+  // Byte 5: Ready Register (vcc_uvlo_rdy, thsd_rdy, stby_rdy)
   
   uint8_t status_data[7] = {
-    status_flags,
+    status.reg,
     (uint8_t)(driver.isReady() ? 0x01 : 0x00),
     (uint8_t)(driver.isFault() ? 0x01 : 0x00),
-    0x00, 0x00, 0x00, 0x00  // Reserved bytes
+    nfault.reg,
+    ready.reg,
+    0x00, 0x00
   };
   
   send_can_message(0x01, status_data, 8);
   
-  // Also print to Serial for debugging
-  Serial.println("Driver status sent via CAN");
+  // Serial diagnostics
+  Serial.print("Status: 0x"); Serial.print(status.reg, HEX);
+  Serial.print(" | NFault: 0x"); Serial.print(nfault.reg, HEX);
+  Serial.print(" | Ready: 0x"); Serial.println(ready.reg, HEX);
 }
 
 void on_reset(char* cmd) {
@@ -318,7 +315,7 @@ void setup() {
   }
   
   motor.linkDriver(&driver);
-  // current_sense.linkDriver(&driver);
+  current_sense.linkDriver(&driver);
 
   Serial.print("Driver fault: ");
   Serial.println(driver.isFault() ? "true" : "false");
@@ -337,14 +334,14 @@ void setup() {
   }
 
   // Initialise the op amps for the current sensing
-  // opamp_init();
-  // if (current_sense.init()) {
-  //   Serial.println("Current sense init success!");
-  // } else {
-  //   Serial.println("Current sense init failed!");
-  //   init_errors |= 0x04;
-  // }
-  // motor.linkCurrentSense(&current_sense);
+  opamp_init();
+  if (current_sense.init()) {
+    Serial.println("Current sense init success!");
+  } else {
+    Serial.println("Current sense init failed!");
+    init_errors |= 0x04;
+  }
+  motor.linkCurrentSense(&current_sense);
 
   // Initialise the magnetic sensor for position sensing
   magnetic_sensor.init(&spi_class);
@@ -355,43 +352,34 @@ void setup() {
   motor.monitor_variables = 0;
   motor.useMonitoring(CANDebug);
 
-  // Setup motor limits - SMOOTHED for safe movement
-  motor.current_limit = 5.0;          
-  motor.voltage_limit = 10.0;         
-  motor.velocity_limit = 20.0;         // Capped to safer speed (was 50.0)
-  motor.voltage_sensor_align = 1.0;   
-  motor.torque_controller = TorqueControlType::voltage;
+  // Setup motor limits - Current Control Mode
+  motor.current_limit = 2.0;          // 2A safety limit
+  motor.voltage_limit = 24.0;         
+  motor.velocity_limit = 20.0;         
+  motor.voltage_sensor_align = 1.5;   // Dropped to 1.5V (~0.3A) to be whisper-quiet on PSU
+  motor.torque_controller = TorqueControlType::foc_current;
   motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
   motor.controller = MotionControlType::angle;
 
-  motor.LPF_velocity.Tf = 0.08;      
-  // motor.LPF_angle.Tf = 0.01; 
-
-  // ZERO-PRECISION HOLD: I-gain for perfect center, P for stiffness
-  motor.PID_velocity.P = 1.0;        
-  motor.PID_velocity.I = 2.0;        // Re-introduced to kill steady-state error
-  motor.PID_velocity.D = 0.08;       
-  motor.PID_velocity.output_ramp = 300.0; // Faster "fight" (0.03s to peak)
-  motor.PID_velocity.limit = 10.0;   
+  // Inner Current Loop PID (D and Q)
+  motor.PID_current_q.P = 0.5;
+  motor.PID_current_q.I = 10.0;      
+  motor.PID_current_d.P = 0.5;
+  motor.PID_current_d.I = 10.0;
   
-  motor.P_angle.P = 25.0;            // Rock-solid holding (was 12.0)
-  motor.P_angle.limit = 20.0;        
-  // motor.PID_current_q.I = 0; 
-  // motor.PID_current_q.D = 0; 
-
-  // motor.PID_current_q.P = 0.5; 
-  // motor.PID_current_q.I = 0; 
-  // motor.PID_current_q.D = 0; 
-
-  // motor.PID_current_d.P = 0.5;
-  // motor.PID_current_d.I = 0;
-  // motor.PID_current_d.D = 0;
-
-  // motor.LPF_current_q.Tf = 0.01; 
-  // motor.LPF_current_d.Tf = 0.01; 
+  motor.LPF_current_q.Tf = 0.02;     
+  motor.LPF_current_d.Tf = 0.02;     
   
-  motor.LPF_velocity.Tf = 0.05;      // Smooth out sensor noise (was 0.0)
-  // motor.LPF_angle.Tf = 0.01; 
+  motor.LPF_velocity.Tf = 0.05;      
+
+  // Outer Loops (unchanged from successful voltage tune)
+  motor.PID_velocity.P = 1.0;
+  motor.PID_velocity.I = 2.0;
+  motor.PID_velocity.D = 0.08;
+  motor.PID_velocity.output_ramp = 300.0;
+  
+  motor.P_angle.P = 25.0;            
+  motor.P_angle.limit = 20.0;
 
   // Align encoder and start FOC - Automatic Calibration
   delay(100);
