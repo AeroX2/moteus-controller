@@ -17,7 +17,7 @@ LowsideCurrentSense current_sense = LowsideCurrentSense(0.01f, -64.0f / 7.0f * 1
 
 // BLDC motor & driver instance
 STSPIN32G4 driver = STSPIN32G4();
-BLDCMotor motor = BLDCMotor(7, 0.04);
+BLDCMotor motor = BLDCMotor(7); 
 
 // CAN communication
 static CANFDMessage CAN_TX_msg;
@@ -155,6 +155,8 @@ void on_stop(char* cmd) {
   motor.disable();
 }
 
+float user_target = 0;
+
 void on_motor(char* cmd) {
   command.motor(&motor, cmd);
 }
@@ -184,8 +186,8 @@ void on_status(char* cmd) {
   
   uint8_t status_data[7] = {
     status_flags,
-    driver.isReady() ? 0x01 : 0x00,
-    driver.isFault() ? 0x01 : 0x00,
+    (uint8_t)(driver.isReady() ? 0x01 : 0x00),
+    (uint8_t)(driver.isFault() ? 0x01 : 0x00),
     0x00, 0x00, 0x00, 0x00  // Reserved bytes
   };
   
@@ -316,7 +318,7 @@ void setup() {
   }
   
   motor.linkDriver(&driver);
-  current_sense.linkDriver(&driver);
+  // current_sense.linkDriver(&driver);
 
   Serial.print("Driver fault: ");
   Serial.println(driver.isFault() ? "true" : "false");
@@ -335,47 +337,63 @@ void setup() {
   }
 
   // Initialise the op amps for the current sensing
-  opamp_init();
-  if (current_sense.init()) {
-    Serial.println("Current sense init success!");
-  } else {
-    Serial.println("Current sense init failed!");
-    init_errors |= 0x04;
-  }
-  motor.linkCurrentSense(&current_sense);
+  // opamp_init();
+  // if (current_sense.init()) {
+  //   Serial.println("Current sense init success!");
+  // } else {
+  //   Serial.println("Current sense init failed!");
+  //   init_errors |= 0x04;
+  // }
+  // motor.linkCurrentSense(&current_sense);
 
   // Initialise the magnetic sensor for position sensing
   magnetic_sensor.init(&spi_class);
-  magnetic_sensor.min_elapsed_time = 0.00075;
+  // magnetic_sensor.min_elapsed_time = 0.00075;
   motor.linkSensor(&magnetic_sensor);
 
   motor.monitor_downsample = 0;
   motor.monitor_variables = 0;
   motor.useMonitoring(CANDebug);
 
-  // Setup motor limits
-  motor.current_limit = 1.0;
-  motor.voltage_sensor_align = 1.0;
-  motor.velocity_limit = 50.0;
-  motor.torque_controller = TorqueControlType::foc_current;
+  // Setup motor limits - SMOOTHED for safe movement
+  motor.current_limit = 5.0;          
+  motor.voltage_limit = 10.0;         
+  motor.velocity_limit = 20.0;         // Capped to safer speed (was 50.0)
+  motor.voltage_sensor_align = 1.0;   
+  motor.torque_controller = TorqueControlType::voltage;
   motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
   motor.controller = MotionControlType::angle;
 
-  motor.PID_current_q.P = 0.5; 
-  motor.PID_current_q.I = 0; 
-  motor.PID_current_q.D = 0; 
+  motor.LPF_velocity.Tf = 0.08;      
+  // motor.LPF_angle.Tf = 0.01; 
 
-  motor.PID_current_d.P = 0.5;
-  motor.PID_current_d.I = 0;
-  motor.PID_current_d.D = 0;
-
-  motor.LPF_current_q.Tf = 0.01; 
-  motor.LPF_current_d.Tf = 0.01; 
+  // ZERO-PRECISION HOLD: I-gain for perfect center, P for stiffness
+  motor.PID_velocity.P = 1.0;        
+  motor.PID_velocity.I = 2.0;        // Re-introduced to kill steady-state error
+  motor.PID_velocity.D = 0.08;       
+  motor.PID_velocity.output_ramp = 300.0; // Faster "fight" (0.03s to peak)
+  motor.PID_velocity.limit = 10.0;   
   
-  motor.LPF_velocity.Tf = 0.01; 
-  motor.LPF_angle.Tf = 0.01; 
+  motor.P_angle.P = 25.0;            // Rock-solid holding (was 12.0)
+  motor.P_angle.limit = 20.0;        
+  // motor.PID_current_q.I = 0; 
+  // motor.PID_current_q.D = 0; 
 
-  // Align encoder and start FOC - returns 1 for success, 0 for failure
+  // motor.PID_current_q.P = 0.5; 
+  // motor.PID_current_q.I = 0; 
+  // motor.PID_current_q.D = 0; 
+
+  // motor.PID_current_d.P = 0.5;
+  // motor.PID_current_d.I = 0;
+  // motor.PID_current_d.D = 0;
+
+  // motor.LPF_current_q.Tf = 0.01; 
+  // motor.LPF_current_d.Tf = 0.01; 
+  
+  motor.LPF_velocity.Tf = 0.05;      // Smooth out sensor noise (was 0.0)
+  // motor.LPF_angle.Tf = 0.01; 
+
+  // Align encoder and start FOC - Automatic Calibration
   delay(100);
   if (motor.initFOC() == 0) {
     Serial.println("Motor FOC init failed!");
@@ -413,9 +431,13 @@ long old_time = 0;
 void loop() {
   motor.loopFOC();
   motor.move();
-  motor.monitor();
-
   command.run();
+
+  // Safety: Sync target to current position while disabled 
+  // to prevent a jump-to-zero when enabling.
+  if (!motor.enabled) {
+    motor.target = motor.shaft_angle;
+  }
 
   if (fdcan1.receiveFD0(CAN_RX_msg)) {
     Serial.println((char*)CAN_RX_msg.data);
