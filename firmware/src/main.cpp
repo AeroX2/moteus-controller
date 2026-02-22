@@ -6,6 +6,7 @@
 #include "stm32g4xx_hal_opamp.h"
 #include "utilities/stm32math/STM32G4CORDICTrigFunctions.h"
 #include "ACANFD_STM32.h"
+#include <cstring>
 
 // Magnetic sensor instance - I2C
 MagneticSensorSPI magnetic_sensor = MagneticSensorSPI(AS5048_SPI, PD2);
@@ -17,7 +18,7 @@ LowsideCurrentSense current_sense = LowsideCurrentSense(0.01f, -64.0f / 7.0f * 1
 
 // BLDC motor & driver instance
 STSPIN32G4 driver = STSPIN32G4();
-BLDCMotor motor = BLDCMotor(7); 
+BLDCMotor motor = BLDCMotor(7);  // Reverted to 7PP per user confirmation
 
 // CAN communication
 static CANFDMessage CAN_TX_msg;
@@ -161,6 +162,94 @@ void on_motor(char* cmd) {
   command.motor(&motor, cmd);
 }
 
+void print_pid_gains() {
+  CANDebug.print("PID cq: P="); CANDebug.print(motor.PID_current_q.P, 6);
+  CANDebug.print(" I="); CANDebug.print(motor.PID_current_q.I, 6);
+  CANDebug.print(" ramp="); CANDebug.println(motor.PID_current_q.output_ramp, 3);
+
+  CANDebug.print("PID cd: P="); CANDebug.print(motor.PID_current_d.P, 6);
+  CANDebug.print(" I="); CANDebug.print(motor.PID_current_d.I, 6);
+  CANDebug.print(" ramp="); CANDebug.println(motor.PID_current_d.output_ramp, 3);
+
+  CANDebug.print("PID v : P="); CANDebug.print(motor.PID_velocity.P, 6);
+  CANDebug.print(" I="); CANDebug.print(motor.PID_velocity.I, 6);
+  CANDebug.print(" D="); CANDebug.print(motor.PID_velocity.D, 6);
+  CANDebug.print(" ramp="); CANDebug.println(motor.PID_velocity.output_ramp, 3);
+
+  CANDebug.print("P angle: P="); CANDebug.print(motor.P_angle.P, 6);
+  CANDebug.print(" limit="); CANDebug.println(motor.P_angle.limit, 6);
+}
+
+void on_pid(char* cmd) {
+  // Tokenize in-place to avoid sscanf float parsing issues on embedded builds.
+  char* mode = strtok(cmd, " \t");
+  if (mode == nullptr || mode[0] == '?') {
+    print_pid_gains();
+    CANDebug.println("Usage: P cq P I [ramp] | P cd P I [ramp] | P v P I D [ramp] | P a P [limit]");
+    return;
+  }
+
+  auto parse_float = [](char* tok, float& out) -> bool {
+    if (tok == nullptr) return false;
+    char* end = nullptr;
+    out = strtof(tok, &end);
+    return end != tok && *end == '\0';
+  };
+
+  float p = 0.0f, i = 0.0f, d = 0.0f, ramp = 0.0f, limit = 0.0f;
+
+  if (strcmp(mode, "cq") == 0) {
+    char* p_tok = strtok(nullptr, " \t");
+    char* i_tok = strtok(nullptr, " \t");
+    char* r_tok = strtok(nullptr, " \t");
+    if (!parse_float(p_tok, p) || !parse_float(i_tok, i)) {
+      CANDebug.println("Invalid cq args");
+      return;
+    }
+    motor.PID_current_q.P = p;
+    motor.PID_current_q.I = i;
+    if (parse_float(r_tok, ramp)) motor.PID_current_q.output_ramp = ramp;
+  } else if (strcmp(mode, "cd") == 0) {
+    char* p_tok = strtok(nullptr, " \t");
+    char* i_tok = strtok(nullptr, " \t");
+    char* r_tok = strtok(nullptr, " \t");
+    if (!parse_float(p_tok, p) || !parse_float(i_tok, i)) {
+      CANDebug.println("Invalid cd args");
+      return;
+    }
+    motor.PID_current_d.P = p;
+    motor.PID_current_d.I = i;
+    if (parse_float(r_tok, ramp)) motor.PID_current_d.output_ramp = ramp;
+  } else if (strcmp(mode, "v") == 0) {
+    char* p_tok = strtok(nullptr, " \t");
+    char* i_tok = strtok(nullptr, " \t");
+    char* d_tok = strtok(nullptr, " \t");
+    char* r_tok = strtok(nullptr, " \t");
+    if (!parse_float(p_tok, p) || !parse_float(i_tok, i) || !parse_float(d_tok, d)) {
+      CANDebug.println("Invalid v args");
+      return;
+    }
+    motor.PID_velocity.P = p;
+    motor.PID_velocity.I = i;
+    motor.PID_velocity.D = d;
+    if (parse_float(r_tok, ramp)) motor.PID_velocity.output_ramp = ramp;
+  } else if (strcmp(mode, "a") == 0) {
+    char* p_tok = strtok(nullptr, " \t");
+    char* l_tok = strtok(nullptr, " \t");
+    if (!parse_float(p_tok, p)) {
+      CANDebug.println("Invalid a args");
+      return;
+    }
+    motor.P_angle.P = p;
+    if (parse_float(l_tok, limit)) motor.P_angle.limit = limit;
+  } else {
+    CANDebug.println("Unknown PID mode. Use cq, cd, v, a, or ?");
+    return;
+  }
+
+  print_pid_gains();
+}
+
 void on_led(char* cmd) {
   digitalWrite(PC2, cmd[0] == '0' ? LOW : HIGH);
 }
@@ -170,20 +259,13 @@ void on_status(char* cmd) {
   STSPIN32G4NFault nfault = driver.getNFaultRegister();
   STSPIN32G4Ready ready = driver.getReadyRegister();
   
-  // Pack status information into extended telemetry:
-  // Byte 1: Status flags (lock, vcc_uvlo, vds_p, reset, thsd)
-  // Byte 2: Driver ready (HW pin)
-  // Byte 3: Driver fault (HW pin)
-  // Byte 4: NFault Register (vcc_uvlo_flt, thsd_flt, vds_p_flt)
-  // Byte 5: Ready Register (vcc_uvlo_rdy, thsd_rdy, stby_rdy)
-  
-  uint8_t status_data[7] = {
+  uint8_t status_data[6] = {
     status.reg,
     (uint8_t)(driver.isReady() ? 0x01 : 0x00),
     (uint8_t)(driver.isFault() ? 0x01 : 0x00),
     nfault.reg,
     ready.reg,
-    0x00, 0x00
+    0x00
   };
   
   send_can_message(0x01, status_data, 8);
@@ -352,34 +434,38 @@ void setup() {
   motor.monitor_variables = 0;
   motor.useMonitoring(CANDebug);
 
-  // Setup motor limits - Current Control Mode
-  motor.current_limit = 2.0;          // 2A safety limit
-  motor.voltage_limit = 24.0;         
-  motor.velocity_limit = 20.0;         
-  motor.voltage_sensor_align = 1.5;   // Dropped to 1.5V (~0.3A) to be whisper-quiet on PSU
-  motor.torque_controller = TorqueControlType::foc_current;
+  // Setup motor limits - keep safe but allow enough drive to overcome stiction
+  motor.current_limit = 3.0;          
+  motor.voltage_limit = 8.0;         
+  motor.velocity_limit = 20.0;        
+  motor.voltage_sensor_align = 1.5;   
+  motor.torque_controller = TorqueControlType::foc_current; 
   motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
   motor.controller = MotionControlType::angle;
 
-  // Inner Current Loop PID (D and Q)
-  motor.PID_current_q.P = 0.5;
+  // Inner Current Loop PID - Diagnostic Stability Baseline
+  motor.PID_current_q.P = 0.02;      // Lower P for safer initial stability
   motor.PID_current_q.I = 10.0;      
-  motor.PID_current_d.P = 0.5;
+  motor.PID_current_q.output_ramp = 1000.0;  
+  motor.PID_current_d.P = 0.02;
   motor.PID_current_d.I = 10.0;
+  motor.PID_current_d.output_ramp = 1000.0;
   
-  motor.LPF_current_q.Tf = 0.02;     
-  motor.LPF_current_d.Tf = 0.02;     
+  motor.LPF_current_q.Tf = 0.001;    // Sharpened to 1ms to stabilize commutation
+  motor.LPF_current_d.Tf = 0.001;     
   
-  motor.LPF_velocity.Tf = 0.05;      
+  // Lower velocity filtering to reduce lag/choppiness at low speed
+  motor.LPF_velocity.Tf = 0.01;      
 
-  // Outer Loops (unchanged from successful voltage tune)
-  motor.PID_velocity.P = 1.0;
-  motor.PID_velocity.I = 2.0;
-  motor.PID_velocity.D = 0.08;
-  motor.PID_velocity.output_ramp = 300.0;
+  // Outer Loops - smoother low-speed baseline
+  motor.PID_velocity.P = 0.25;
+  motor.PID_velocity.I = 0.02;
+  motor.PID_velocity.D = 0.0015;
+  motor.PID_velocity.output_ramp = 250.0;
   
-  motor.P_angle.P = 25.0;            
-  motor.P_angle.limit = 20.0;
+  // Keep angle loop conservative by default to avoid startup oscillation
+  motor.P_angle.P = 12.0;
+  motor.P_angle.limit = 15.0;
 
   // Align encoder and start FOC - Automatic Calibration
   delay(100);
@@ -401,6 +487,7 @@ void setup() {
   command.add('S', on_stop, "stop");
   command.add('U', on_update_frequency, "update frequency");
   command.add('I', on_init_status, "init status");
+  command.add('P', on_pid, "pid tune/print");
   // Send final initialization status
   if (init_errors == 0) {
     Serial.println("All components initialized successfully!");
