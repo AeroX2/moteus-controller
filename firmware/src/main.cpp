@@ -4,6 +4,8 @@
 #include "SimpleFOCDrivers.h"
 #include "drivers/stspin32g4/STSPIN32G4.h"
 #include "stm32g4xx_hal_opamp.h"
+#include "stm32g4xx_hal_flash.h"
+#include "stm32g4xx_hal_flash_ex.h"
 #include "utilities/stm32math/STM32G4CORDICTrigFunctions.h"
 #include "ACANFD_STM32.h"
 #include <cstring>
@@ -148,6 +150,22 @@ public:
   }
 };
 
+// PID storage in flash (last 2KB page of 128KB: 0x0801F800)
+#define PID_FLASH_MAGIC 0x50494453u  // "PIDS"
+#define PID_FLASH_PAGE 63
+#define PID_FLASH_ADDR (0x08000000u + (PID_FLASH_PAGE * 2048u))
+
+#pragma pack(push, 1)
+struct PidFlashData {
+  uint32_t magic;
+  float cq_p, cq_i, cq_ramp;
+  float cd_p, cd_i, cd_ramp;
+  float v_p, v_i, v_d, v_ramp;
+  float angle_p, angle_limit;
+  float velocity_limit;
+};
+#pragma pack(pop)
+
 // Commander interface
 CANDebugStream can_stream(&CANDebug);
 Commander command = Commander(can_stream);
@@ -185,7 +203,7 @@ void on_pid(char* cmd) {
   char* mode = strtok(cmd, " \t");
   if (mode == nullptr || mode[0] == '?') {
     print_pid_gains();
-    CANDebug.println("Usage: P cq P I [ramp] | P cd P I [ramp] | P v P I D [ramp] | P a P [limit]");
+    CANDebug.println("Usage: P cq P I [ramp] | P cd P I [ramp] | P v P I D [ramp] | P a P [limit] | P vl limit");
     return;
   }
 
@@ -242,12 +260,94 @@ void on_pid(char* cmd) {
     }
     motor.P_angle.P = p;
     if (parse_float(l_tok, limit)) motor.P_angle.limit = limit;
+  } else if (strcmp(mode, "vl") == 0) {
+    char* l_tok = strtok(nullptr, " \t");
+    if (!parse_float(l_tok, limit)) {
+      CANDebug.println("Invalid vl args");
+      return;
+    }
+    motor.velocity_limit = limit;
+    CANDebug.print("Set motor.velocity_limit = ");
+    CANDebug.println(motor.velocity_limit, 6);
   } else {
     CANDebug.println("Unknown PID mode. Use cq, cd, v, a, or ?");
     return;
   }
 
   print_pid_gains();
+}
+
+static bool save_pid_to_flash(void) {
+  PidFlashData data = {};
+  data.magic = PID_FLASH_MAGIC;
+  data.cq_p = motor.PID_current_q.P;
+  data.cq_i = motor.PID_current_q.I;
+  data.cq_ramp = motor.PID_current_q.output_ramp;
+  data.cd_p = motor.PID_current_d.P;
+  data.cd_i = motor.PID_current_d.I;
+  data.cd_ramp = motor.PID_current_d.output_ramp;
+  data.v_p = motor.PID_velocity.P;
+  data.v_i = motor.PID_velocity.I;
+  data.v_d = motor.PID_velocity.D;
+  data.v_ramp = motor.PID_velocity.output_ramp;
+  data.angle_p = motor.P_angle.P;
+  data.angle_limit = motor.P_angle.limit;
+  data.velocity_limit = motor.velocity_limit;
+
+  HAL_FLASH_Unlock();
+  FLASH_EraseInitTypeDef erase = {};
+  erase.TypeErase = FLASH_TYPEERASE_PAGES;
+  erase.Banks = FLASH_BANK_1;
+  erase.Page = PID_FLASH_PAGE;
+  erase.NbPages = 1;
+  uint32_t pageError = 0;
+  if (HAL_FLASHEx_Erase(&erase, &pageError) != HAL_OK) {
+    HAL_FLASH_Lock();
+    return false;
+  }
+  const uint8_t* src = (const uint8_t*)&data;
+  uint32_t addr = PID_FLASH_ADDR;
+  size_t len = sizeof(PidFlashData);
+  for (size_t i = 0; i < len; i += 8) {
+    uint64_t dword = 0;
+    for (int j = 0; j < 8 && (i + j) < len; j++) {
+      ((uint8_t*)&dword)[j] = src[i + j];
+    }
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, addr + i, dword) != HAL_OK) {
+      HAL_FLASH_Lock();
+      return false;
+    }
+  }
+  HAL_FLASH_Lock();
+  return true;
+}
+
+static bool load_pid_from_flash(void) {
+  const PidFlashData* data = (const PidFlashData*)PID_FLASH_ADDR;
+  if (data->magic != PID_FLASH_MAGIC) return false;
+  motor.PID_current_q.P = data->cq_p;
+  motor.PID_current_q.I = data->cq_i;
+  motor.PID_current_q.output_ramp = data->cq_ramp;
+  motor.PID_current_d.P = data->cd_p;
+  motor.PID_current_d.I = data->cd_i;
+  motor.PID_current_d.output_ramp = data->cd_ramp;
+  motor.PID_velocity.P = data->v_p;
+  motor.PID_velocity.I = data->v_i;
+  motor.PID_velocity.D = data->v_d;
+  motor.PID_velocity.output_ramp = data->v_ramp;
+  motor.P_angle.P = data->angle_p;
+  motor.P_angle.limit = data->angle_limit;
+  motor.velocity_limit = data->velocity_limit;
+  return true;
+}
+
+void on_save_pid(char* cmd) {
+  (void)cmd;
+  if (save_pid_to_flash()) {
+    CANDebug.println("PID saved to flash.");
+  } else {
+    CANDebug.println("PID save failed.");
+  }
 }
 
 void on_led(char* cmd) {
@@ -435,17 +535,17 @@ void setup() {
   motor.useMonitoring(CANDebug);
 
   // Setup motor limits - keep safe but allow enough drive to overcome stiction
-  motor.current_limit = 3.0;          
-  motor.voltage_limit = 8.0;         
-  motor.velocity_limit = 20.0;        
-  motor.voltage_sensor_align = 1.5;   
-  motor.torque_controller = TorqueControlType::foc_current; 
+  motor.current_limit = 3.0;
+  motor.voltage_limit = 8.0;      
+  motor.velocity_limit = 50.0;
+  motor.voltage_sensor_align = 1.5;
+  motor.torque_controller = TorqueControlType::foc_current;
   motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
   motor.controller = MotionControlType::angle;
 
   // Inner Current Loop PID - Diagnostic Stability Baseline
   motor.PID_current_q.P = 0.02;      // Lower P for safer initial stability
-  motor.PID_current_q.I = 10.0;      
+  motor.PID_current_q.I = 10.0;
   motor.PID_current_q.output_ramp = 1000.0;  
   motor.PID_current_d.P = 0.02;
   motor.PID_current_d.I = 10.0;
@@ -457,15 +557,20 @@ void setup() {
   // Lower velocity filtering to reduce lag/choppiness at low speed
   motor.LPF_velocity.Tf = 0.01;      
 
-  // Outer Loops - smoother low-speed baseline
-  motor.PID_velocity.P = 0.25;
-  motor.PID_velocity.I = 0.02;
-  motor.PID_velocity.D = 0.0015;
+  // Outer Loops - tuned values from on-device testing
+  motor.PID_velocity.P = 0.35;
+  motor.PID_velocity.I = 0.01;
+  motor.PID_velocity.D = 0.007;
   motor.PID_velocity.output_ramp = 250.0;
   
-  // Keep angle loop conservative by default to avoid startup oscillation
-  motor.P_angle.P = 12.0;
-  motor.P_angle.limit = 15.0;
+  // Angle loop tuning
+  motor.P_angle.P = 6.5;
+  motor.P_angle.limit = 40.0;
+
+  // Load saved PID values from flash if present
+  if (load_pid_from_flash()) {
+    Serial.println("Loaded PID values from flash.");
+  }
 
   // Align encoder and start FOC - Automatic Calibration
   delay(100);
@@ -488,6 +593,7 @@ void setup() {
   command.add('U', on_update_frequency, "update frequency");
   command.add('I', on_init_status, "init status");
   command.add('P', on_pid, "pid tune/print");
+  command.add('W', on_save_pid, "save PID to flash");
   // Send final initialization status
   if (init_errors == 0) {
     Serial.println("All components initialized successfully!");

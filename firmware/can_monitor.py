@@ -312,8 +312,30 @@ class CANMonitor:
                 time.sleep(0.001)  # 1ms instead of 10ms
                 
             except Exception as e:
+                # Handle serial errors (e.g. device unplugged or permission error) and try to reconnect
                 self.add_message(f"[red]Error in monitor loop: {e}[/red]")
-                break
+                try:
+                    if self.ser and self.ser.is_open:
+                        self.ser.close()
+                except Exception:
+                    pass
+                self.ser = None
+
+                # Attempt automatic reconnect while the monitor is still running
+                retry_delay = 1.0
+                max_retries = 30  # ~30 seconds total
+                for _ in range(max_retries):
+                    if not self.running:
+                        break
+                    self.add_message("[yellow]Attempting to reconnect to serial port...[/yellow]")
+                    if self.connect():
+                        self.add_message("[green]Serial reconnect successful[/green]")
+                        break
+                    time.sleep(retry_delay)
+
+                if not self.ser or not self.ser.is_open:
+                    self.add_message("[red]Unable to reconnect to serial port, stopping monitor thread[/red]")
+                    break
     
     def send_command(self, target_id, command):
         """Send ASCII command to specified CAN ID"""
