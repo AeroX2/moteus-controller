@@ -394,6 +394,37 @@ void on_update_frequency(char* cmd) {
   Serial.println("ms");
 }
 
+void on_controller_mode(char* cmd) {
+  // Usage:
+  //   C a  -> angle control (default)
+  //   C v  -> velocity control (for tuning PID v)
+  if (cmd == nullptr) {
+    CANDebug.println("Usage: C a|v  (a=angle, v=velocity)");
+    return;
+  }
+
+  // Skip leading whitespace
+  while (*cmd == ' ' || *cmd == '\t') {
+    cmd++;
+  }
+
+  char mode = *cmd;
+  if (mode != 'a' && mode != 'v') {
+    CANDebug.println("Usage: C a|v  (a=angle, v=velocity)");
+    return;
+  }
+
+  if (mode == 'v') {
+    motor.controller = MotionControlType::velocity;
+    motor.target = 0.0f;  // start from standstill
+    CANDebug.println("Controller mode: velocity");
+  } else { // 'a'
+    motor.controller = MotionControlType::angle;
+    motor.target = motor.shaft_angle;  // avoid jump when re-enabling angle mode
+    CANDebug.println("Controller mode: angle");
+  }
+}
+
 void on_init_status(char* cmd) {
   // Send initialization status through CAN
   uint8_t init_data[7] = {
@@ -537,7 +568,7 @@ void setup() {
   // Setup motor limits - keep safe but allow enough drive to overcome stiction
   motor.current_limit = 3.0;
   motor.voltage_limit = 8.0;      
-  motor.velocity_limit = 50.0;
+  motor.velocity_limit = 100.0;
   motor.voltage_sensor_align = 1.5;
   motor.torque_controller = TorqueControlType::foc_current;
   motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
@@ -558,14 +589,14 @@ void setup() {
   motor.LPF_velocity.Tf = 0.01;      
 
   // Outer Loops - tuned values from on-device testing
-  motor.PID_velocity.P = 0.35;
-  motor.PID_velocity.I = 0.01;
-  motor.PID_velocity.D = 0.007;
-  motor.PID_velocity.output_ramp = 250.0;
+  motor.PID_velocity.P = 0.15;
+  motor.PID_velocity.I = 0.003;
+  motor.PID_velocity.D = 0.0;
+  motor.PID_velocity.output_ramp = 500.0;
   
   // Angle loop tuning
-  motor.P_angle.P = 6.5;
-  motor.P_angle.limit = 40.0;
+  motor.P_angle.P = 10.0;
+  motor.P_angle.limit = 70.0;
 
   // Load saved PID values from flash if present
   if (load_pid_from_flash()) {
@@ -591,6 +622,7 @@ void setup() {
   command.add('R', on_reset, "driver reset");
   command.add('S', on_stop, "stop");
   command.add('U', on_update_frequency, "update frequency");
+  command.add('C', on_controller_mode, "controller mode (a=angle, v=velocity)");
   command.add('I', on_init_status, "init status");
   command.add('P', on_pid, "pid tune/print");
   command.add('W', on_save_pid, "save PID to flash");
