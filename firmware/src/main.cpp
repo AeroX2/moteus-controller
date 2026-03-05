@@ -14,7 +14,7 @@
 MagneticSensorSPI magnetic_sensor = MagneticSensorSPI(AS5048_SPI, PD2);
 SPIClass spi_class(PB5, PB4, PB3);
 
-// Low side current sense sensor 
+// Low side current sense sensor
 // (gain values comes from B-G431B-ESC1, multiplied by 10 because that is what worked)
 LowsideCurrentSense current_sense = LowsideCurrentSense(0.01f, -64.0f / 7.0f * 10.0f, PB1, _NC, PA2);
 
@@ -71,7 +71,7 @@ class CANDebugInterface : public Print {
 private:
   char message_buffer[64];
   int buffer_pos = 0;
-  
+
 public:
   void send_string(const char* msg) {
     if (id == 0 || msg == nullptr) return;
@@ -105,7 +105,7 @@ public:
     }
     return 1;
   }
-  
+
   virtual size_t write(const uint8_t *buffer, size_t size) override {
     for (size_t i = 0; i < size; i++) {
       write(buffer[i]);
@@ -129,21 +129,21 @@ CANDebugInterface CANDebug;
 class CANDebugStream : public Stream {
 private:
   CANDebugInterface* can_debug;
-  
+
 public:
   CANDebugStream(CANDebugInterface* debug) : can_debug(debug) {}
-  
+
   // Stream interface methods
   int available() override { return 0; } // No input available
   int read() override { return -1; } // No input
   int peek() override { return -1; } // No input
-  
+
   // Print interface methods (inherited from Print)
   size_t write(uint8_t c) override {
     if (can_debug) return can_debug->write(c);
     return 0;
   }
-  
+
   size_t write(const uint8_t *buffer, size_t size) override {
     if (can_debug) return can_debug->write(buffer, size);
     return 0;
@@ -358,7 +358,7 @@ void on_status(char* cmd) {
   STSPIN32G4Status status = driver.status();
   STSPIN32G4NFault nfault = driver.getNFaultRegister();
   STSPIN32G4Ready ready = driver.getReadyRegister();
-  
+
   uint8_t status_data[6] = {
     status.reg,
     (uint8_t)(driver.isReady() ? 0x01 : 0x00),
@@ -367,9 +367,9 @@ void on_status(char* cmd) {
     ready.reg,
     0x00
   };
-  
+
   send_can_message(0x01, status_data, 8);
-  
+
   // Serial diagnostics
   Serial.print("Status: 0x"); Serial.print(status.reg, HEX);
   Serial.print(" | NFault: 0x"); Serial.print(nfault.reg, HEX);
@@ -432,9 +432,9 @@ void on_init_status(char* cmd) {
     motor.motor_status,
     0x00, 0x00, 0x00, 0x00, 0x00  // Reserved bytes
   };
-  
+
   send_can_message(0x03, init_data, 8);
-  
+
   Serial.println("Initialization status sent via CAN");
 }
 
@@ -485,10 +485,10 @@ void setup() {
   #endif
 
   id = HAL_GetUIDw0();
-  
+
   // Configure ACANFD_STM32 for FD mode with bit rate switching
   ACANFD_STM32_Settings settings(1000000, DataBitRateFactor::x5);
-  
+
   ACANFD_STM32_StandardFilters standardFilters;
   standardFilters.addSingle(id, ACANFD_STM32_FilterAction::FIFO0);
   settings.mNonMatchingStandardFrameReception = ACANFD_STM32_FilterAction::REJECT;
@@ -496,7 +496,7 @@ void setup() {
   ACANFD_STM32_ExtendedFilters extendedFilters;
   extendedFilters.addSingle(id, ACANFD_STM32_FilterAction::FIFO0);
   settings.mNonMatchingExtendedFrameReception = ACANFD_STM32_FilterAction::REJECT;
-  
+
   const uint32_t errorCode = fdcan1.beginFD(settings, standardFilters, extendedFilters);
   if (errorCode == 0) {
     Serial.println("CANFD configuration OK");
@@ -526,13 +526,13 @@ void setup() {
   } else {
     Serial.println("Driver init success!");
   }
-  
+
   motor.linkDriver(&driver);
   current_sense.linkDriver(&driver);
 
   Serial.print("Driver fault: ");
   Serial.println(driver.isFault() ? "true" : "false");
-  
+
   // Additional driver status check
   if (driver.isFault()) {
     init_errors |= 0x02;
@@ -567,7 +567,7 @@ void setup() {
 
   // Setup motor limits - keep safe but allow enough drive to overcome stiction
   motor.current_limit = 3.0;
-  motor.voltage_limit = 8.0;      
+  motor.voltage_limit = 8.0;
   motor.velocity_limit = 100.0;
   motor.voltage_sensor_align = 1.5;
   motor.torque_controller = TorqueControlType::foc_current;
@@ -577,23 +577,23 @@ void setup() {
   // Inner Current Loop PID - Diagnostic Stability Baseline
   motor.PID_current_q.P = 0.02;      // Lower P for safer initial stability
   motor.PID_current_q.I = 10.0;
-  motor.PID_current_q.output_ramp = 1000.0;  
+  motor.PID_current_q.output_ramp = 1000.0;
   motor.PID_current_d.P = 0.02;
   motor.PID_current_d.I = 10.0;
   motor.PID_current_d.output_ramp = 1000.0;
-  
+
   motor.LPF_current_q.Tf = 0.001;    // Sharpened to 1ms to stabilize commutation
-  motor.LPF_current_d.Tf = 0.001;     
-  
+  motor.LPF_current_d.Tf = 0.001;
+
   // Lower velocity filtering to reduce lag/choppiness at low speed
-  motor.LPF_velocity.Tf = 0.01;      
+  motor.LPF_velocity.Tf = 0.02;
 
   // Outer Loops - tuned values from on-device testing
   motor.PID_velocity.P = 0.15;
   motor.PID_velocity.I = 0.003;
   motor.PID_velocity.D = 0.0;
-  motor.PID_velocity.output_ramp = 500.0;
-  
+  motor.PID_velocity.output_ramp = 400.0;
+
   // Angle loop tuning
   motor.P_angle.P = 10.0;
   motor.P_angle.limit = 70.0;
@@ -646,7 +646,7 @@ void loop() {
   motor.move();
   command.run();
 
-  // Safety: Sync target to current position while disabled 
+  // Safety: Sync target to current position while disabled
   // to prevent a jump-to-zero when enabling.
   if (!motor.enabled) {
     motor.target = motor.shaft_angle;
@@ -693,7 +693,7 @@ void SystemClock_Config(void) {
   /** Configure the main internal regulator output voltage */
   HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1_BOOST);
 
-  /** 
+  /**
    * Initializes the RCC Oscillators according to the specified parameters
    * in the RCC_OscInitTypeDef structure.
    */
