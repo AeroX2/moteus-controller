@@ -1,0 +1,152 @@
+--- a/src/common/base_classes/FOCMotor.cpp
++++ b/src/common/base_classes/FOCMotor.cpp
+@@ -858,69 +858,118 @@
+   float voltage_align = voltage_sensor_align;
+ 
+   // if unknown natural direction
++  const bool had_dir_on_entry = (sensor_direction != Direction::UNKNOWN);
++  const bool had_zero_on_entry = _isset(zero_electric_angle);
++
+   if(sensor_direction == Direction::UNKNOWN){
+ 
+-    // find natural direction
+-    // move one electrical revolution forward
+-    for (int i = 0; i <=500; i++ ) {
+-      float angle = _3PI_2 + _2PI * i / 500.0f;
+-      setPhaseVoltage(voltage_align, 0,  angle);
+-	    sensor->update();
++    //--- Smooth alignment: rotation at constant electrical speed---
++    const float alignment_speed_elec_rev_per_s = 1.0f;
++    const unsigned long duration_dir_us = 1200000UL;  // 1.2 s each direction for direction finding
++    const unsigned long ramp_up_us = 300000UL;       // ramp voltage over 300 ms at start to reduce initial jerk
++    const unsigned long pause_reverse_us = 200000UL;  // coast down before reversing to reduce "pok"
++
++    // spin forward then backward (smooth, no step-by-step)
++    unsigned long t0 = _micros();
++    while (1) {
++      unsigned long elapsed = _micros()- t0;
++      if (elapsed >= duration_dir_us) break;
++      float t_sec = (float)elapsed * 1e-6f;
++      float angle = _3PI_2 + _2PI * (t_sec * alignment_speed_elec_rev_per_s);
++      float v = (elapsed < ramp_up_us) ? (voltage_align * (float)elapsed / (float)ramp_up_us) : voltage_align;
++      setPhaseVoltage(v, 0, angle);
++      sensor->update();
+       _delay(2);
+     }
+-    // take and angle in the middle
+     sensor->update();
+     float mid_angle = sensor->getAngle();
+-    // move one electrical revolution backwards
+-    for (int i = 500; i >=0; i-- ) {
+-      float angle = _3PI_2 + _2PI * i / 500.0f ;
+-      setPhaseVoltage(voltage_align, 0,  angle);
+-	    sensor->update();
++    setPhaseVoltage(0, 0, 0);
++    _delay(pause_reverse_us / 1000);
++    t0 = _micros();
++    while (1) {
++      unsigned long elapsed = _micros()- t0;
++      if (elapsed >= duration_dir_us) break;
++      float t_sec = (float)elapsed * 1e-6f;
++      float angle = _3PI_2 + _2PI - _2PI * (t_sec * alignment_speed_elec_rev_per_s);
++      float v = (elapsed < ramp_up_us) ? (voltage_align * (float)elapsed / (float)ramp_up_us) : voltage_align;
++      setPhaseVoltage(v, 0, angle);
++      sensor->update();
+       _delay(2);
+     }
+     sensor->update();
+     float end_angle = sensor->getAngle();
+-    // setPhaseVoltage(0, 0, 0);
+     _delay(200);
+-    // determine the direction the sensor moved
+-    float moved =  fabs(mid_angle - end_angle);
+-    if (moved<MIN_ANGLE_DETECT_MOVEMENT) { // minimum angle to detect movement
++    float moved = fabs(mid_angle- end_angle);
++    if (moved < MIN_ANGLE_DETECT_MOVEMENT) {
+       SIMPLEFOC_MOTOR_ERROR("Failed to notice movement");
+-      return 0; // failed calibration
++      return 0;
+     } else if (mid_angle < end_angle) {
+       SIMPLEFOC_MOTOR_DEBUG("sensor dir: CCW");
+       sensor_direction = Direction::CCW;
+-    } else{
++    } else {
+       SIMPLEFOC_MOTOR_DEBUG("sensor dir: CW");
+       sensor_direction = Direction::CW;
+     }
+-    // check pole pair number
+-    pp_check_result = !(fabs(moved*pole_pairs - _2PI) > 0.5f);  // 0.5f is arbitrary number it can be lower or higher!
+-    if( pp_check_result==false ) {
+-      SIMPLEFOC_MOTOR_WARN("PP check: fail - est. pp: ", _2PI/moved);
++
++    float estimated_pp = _2PI / moved;
++    pp_check_result = (fabsf(estimated_pp - (float)pole_pairs) < 2.0f);
++    if (pp_check_result == false) {
++      SIMPLEFOC_MOTOR_WARN("PP check: fail- est. pp: ", estimated_pp);
+     } else {
+       SIMPLEFOC_MOTOR_DEBUG("PP check: OK!");
+     }
+ 
+-  } else SIMPLEFOC_MOTOR_DEBUG("Skip dir calib."); 
++    // zero electric angle: spin one full mechanical rev, sample (phase_cmd, mech), circular mean of offset
++    unsigned long duration_zero_us = (unsigned long)((float)pole_pairs * 1e6f);
++    const unsigned long sample_interval_us = 25000UL;  // 25 ms
++    float sum_sin = 0.0f, sum_cos = 0.0f;
++    t0 = _micros();
++    unsigned long last_sample_us = t0;
++    while (1) {
++      unsigned long now_us = _micros();
++      unsigned long elapsed = now_us- t0;
++      if (elapsed >= duration_zero_us) break;
++      float t_sec = (float)elapsed * 1e-6f;
++      float phase_cmd = _normalizeAngle(_3PI_2 + _2PI * (t_sec * alignment_speed_elec_rev_per_s));
++      float v = (elapsed < ramp_up_us) ? (voltage_align * (float)elapsed / (float)ramp_up_us) : voltage_align;
++      setPhaseVoltage(v, 0, phase_cmd);
++      sensor->update();
++      if (now_us- last_sample_us >= sample_interval_us) {
++        last_sample_us = now_us;
++        float mech = sensor->getMechanicalAngle();
++        float zero_i = _normalizeAngle((float)(sensor_direction * pole_pairs) * mech- phase_cmd);
++        sum_sin += _sin(zero_i);
++        sum_cos += _cos(zero_i);
++      }
++      _delay(2);
++    }
++    zero_electric_angle = _normalizeAngle(_atan2(sum_sin, sum_cos));
++    SIMPLEFOC_MOTOR_DEBUG("Zero elec. angle: ", zero_electric_angle);
++    setPhaseVoltage(0, 0, 0);
++    _delay(200);
++
++    // We did both direction and offset in this path; mimic original logging by
++    // not emitting any "Skip ..." messages for work we just performed.
++    return exit_flag;
++
++  } else if (had_dir_on_entry) {
++    SIMPLEFOC_MOTOR_DEBUG("Skip dir calib.");
++  }
+ 
+-  // zero electric angle not known
++  // If direction was already known on entry, behave like original:
++  // calibrate zero if not set, otherwise (if it was set on entry) print skip.
+   if(!_isset(zero_electric_angle)){
+-    // align the electrical phases of the motor and sensor
+-    // set angle -90(270 = 3PI/2) degrees
+     setPhaseVoltage(voltage_align, 0,  _3PI_2);
+     _delay(700);
+-    // read the sensor
+     sensor->update();
+-    // get the current zero electric angle
+-    zero_electric_angle = 0;
+     zero_electric_angle = electricalAngle();
+     _delay(20);
+     SIMPLEFOC_MOTOR_DEBUG("Zero elec. angle: ", zero_electric_angle);
+-    // stop everything
+     setPhaseVoltage(0, 0, 0);
+     _delay(200);
+-  } else { SIMPLEFOC_MOTOR_DEBUG("Skip offset calib."); }
++  } else if (had_zero_on_entry) {
++    SIMPLEFOC_MOTOR_DEBUG("Skip offset calib.");
++  }
+   return exit_flag;
+ }
+ 
