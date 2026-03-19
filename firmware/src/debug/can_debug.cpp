@@ -1,18 +1,19 @@
 #include "debug/can_debug.h"
+#include "telemetry/messages.h"
+#include "platform/fdcan.h"
 
 #include <cstring>
 
-CANFDMessage CAN_TX_msg;
-CANFDMessage CAN_RX_msg;
+using namespace telemetry;
 
 uint32_t id = 0;
 long update_frequency = 100;
 uint8_t init_errors = 0;
 
-void send_can_message(uint8_t message_type, const uint8_t* data, uint8_t data_len) {
+void send_can_message(CanMsgType message_type, const uint8_t* data, uint8_t payload_len) {
   if (id == 0) return; // Only send if CAN is initialized
 
-  if (data_len == 0) data_len = 1;
+  uint8_t data_len = payload_len + 1;  // +1 for type byte
 
   auto round_dlc = [](uint8_t n)->uint8_t {
     if (n <= 8)  return n;
@@ -26,21 +27,22 @@ void send_can_message(uint8_t message_type, const uint8_t* data, uint8_t data_le
   };
   uint8_t dlc = round_dlc(data_len);
 
-  CAN_TX_msg.id = id;
-  CAN_TX_msg.len = dlc;
-  CAN_TX_msg.ext = true;
-  CAN_TX_msg.type = CANFDMessage::CANFD_NO_BIT_RATE_SWITCH;
-  CAN_TX_msg.data[0] = message_type;
+  CANFDMessage tx_msg;
+  tx_msg.id = id;
+  tx_msg.len = dlc;
+  tx_msg.ext = true;
+  tx_msg.type = CANFDMessage::CANFD_NO_BIT_RATE_SWITCH;
+  tx_msg.data[0] = static_cast<uint8_t>(message_type);
 
-  int copy_bytes = (data_len > 1) ? (data_len - 1) : 0;
+  int copy_bytes = (payload_len > 0) ? payload_len : 0;
   if (copy_bytes > 63) copy_bytes = 63;
   for (int i = 0; i < copy_bytes; i++) {
-    CAN_TX_msg.data[1 + i] = data[i];
+    tx_msg.data[1 + i] = data[i];
   }
   for (int i = copy_bytes; i < (dlc - 1); i++) {
-    CAN_TX_msg.data[1 + i] = 0x00;
+    tx_msg.data[1 + i] = 0x00;
   }
-  fdcan1.tryToSendReturnStatusFD(CAN_TX_msg);
+  fdcan_send(&tx_msg);
 }
 
 CANDebugInterface CANDebug;
@@ -54,7 +56,7 @@ void CANDebugInterface::send_string(const char* msg) {
     if (chunk > 63) chunk = 63;
     uint8_t frame[63] = {0};
     if (chunk) memcpy(frame, msg + offset, chunk);
-    send_can_message(0x04, frame, static_cast<uint8_t>(chunk + 1));
+    send_can_message(CanMsgType::DebugString, frame, static_cast<uint8_t>(chunk));
     offset += chunk;
   }
 }

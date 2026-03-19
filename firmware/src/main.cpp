@@ -1,15 +1,12 @@
 #include <Arduino.h>
 
 #include "app/can_init.h"
-#include "app/app_context.h"
 #include "app/motor_init.h"
-#include "app/telemetry.h"
+#include "commands/commands.h"
 #include "debug/can_debug.h"
 #include "debug/debug_init.h"
-#include "commands/commands.h"
-
-// Defines `fdcan1` instance + IRQ handlers (must be included in ONE TU only).
-#include "ACANFD_STM32.h"
+#include "drivers/motor_objects.h"
+#include "telemetry/telemetry.h"
 
 void setup() {
   #ifndef CAN_DEBUG

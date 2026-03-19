@@ -1,10 +1,14 @@
 #include "commands/commands.h"
 
-#include "app/app_context.h"
 #include "debug/can_debug.h"
+#include "drivers/motor_objects.h"
+#include "platform/fdcan.h"
 #include "storage/pid_flash.h"
+#include "telemetry/messages.h"
 
 #include <cstring>
+
+using namespace telemetry;
 
 static CANDebugStream can_stream(&CANDebug);
 Commander command = Commander(can_stream);
@@ -37,6 +41,8 @@ static void on_motor(char* cmd) {
 }
 
 static void on_pid(char* cmd) {
+  BLDCMotor* m = &motor;
+
   char* mode = strtok(cmd, " \t");
   if (mode == nullptr || mode[0] == '?') {
     print_pid_gains();
@@ -61,9 +67,9 @@ static void on_pid(char* cmd) {
       CANDebug.println("Invalid cq args");
       return;
     }
-    motor.PID_current_q.P = p;
-    motor.PID_current_q.I = i;
-    if (parse_float(r_tok, ramp)) motor.PID_current_q.output_ramp = ramp;
+    m->PID_current_q.P = p;
+    m->PID_current_q.I = i;
+    if (parse_float(r_tok, ramp)) m->PID_current_q.output_ramp = ramp;
   } else if (strcmp(mode, "cd") == 0) {
     char* p_tok = strtok(nullptr, " \t");
     char* i_tok = strtok(nullptr, " \t");
@@ -72,9 +78,9 @@ static void on_pid(char* cmd) {
       CANDebug.println("Invalid cd args");
       return;
     }
-    motor.PID_current_d.P = p;
-    motor.PID_current_d.I = i;
-    if (parse_float(r_tok, ramp)) motor.PID_current_d.output_ramp = ramp;
+    m->PID_current_d.P = p;
+    m->PID_current_d.I = i;
+    if (parse_float(r_tok, ramp)) m->PID_current_d.output_ramp = ramp;
   } else if (strcmp(mode, "v") == 0) {
     char* p_tok = strtok(nullptr, " \t");
     char* i_tok = strtok(nullptr, " \t");
@@ -84,10 +90,10 @@ static void on_pid(char* cmd) {
       CANDebug.println("Invalid v args");
       return;
     }
-    motor.PID_velocity.P = p;
-    motor.PID_velocity.I = i;
-    motor.PID_velocity.D = d;
-    if (parse_float(r_tok, ramp)) motor.PID_velocity.output_ramp = ramp;
+    m->PID_velocity.P = p;
+    m->PID_velocity.I = i;
+    m->PID_velocity.D = d;
+    if (parse_float(r_tok, ramp)) m->PID_velocity.output_ramp = ramp;
   } else if (strcmp(mode, "a") == 0) {
     char* p_tok = strtok(nullptr, " \t");
     char* l_tok = strtok(nullptr, " \t");
@@ -95,17 +101,17 @@ static void on_pid(char* cmd) {
       CANDebug.println("Invalid a args");
       return;
     }
-    motor.P_angle.P = p;
-    if (parse_float(l_tok, limit)) motor.P_angle.limit = limit;
+    m->P_angle.P = p;
+    if (parse_float(l_tok, limit)) m->P_angle.limit = limit;
   } else if (strcmp(mode, "vl") == 0) {
     char* l_tok = strtok(nullptr, " \t");
     if (!parse_float(l_tok, limit)) {
       CANDebug.println("Invalid vl args");
       return;
     }
-    motor.velocity_limit = limit;
+    m->velocity_limit = limit;
     CANDebug.print("Set motor.velocity_limit = ");
-    CANDebug.println(motor.velocity_limit, 6);
+    CANDebug.println(m->velocity_limit, 6);
   } else {
     CANDebug.println("Unknown PID mode. Use cq, cd, v, a, or ?");
     return;
@@ -126,20 +132,22 @@ static void on_led(char* cmd) {
 
 static void on_status(char* cmd) {
   (void)cmd;
-  STSPIN32G4Status status = driver.status();
-  STSPIN32G4NFault nfault = driver.getNFaultRegister();
-  STSPIN32G4Ready ready = driver.getReadyRegister();
+  STSPIN32G4* d = &driver;
+  STSPIN32G4Status status = d->status();
+  STSPIN32G4NFault nfault = d->getNFaultRegister();
+  STSPIN32G4Ready ready = d->getReadyRegister();
 
-  uint8_t status_data[6] = {
-    status.reg,
-    (uint8_t)(driver.isReady() ? 0x01 : 0x00),
-    (uint8_t)(driver.isFault() ? 0x01 : 0x00),
-    nfault.reg,
-    ready.reg,
-    0x00
-  };
+  telemetry::DriverStatusPayload payload = {};
+  payload.status_reg = status.reg;
+  payload.ready = d->isReady() ? 1 : 0;
+  payload.fault = d->isFault() ? 1 : 0;
+  payload.nfault_reg = nfault.reg;
+  payload.ready_reg = ready.reg;
 
-  send_can_message(0x01, status_data, 8);
+  uint8_t buf[telemetry::DRIVER_STATUS_PAYLOAD_SIZE];
+  telemetry::driver_status_encode(&payload, buf);
+  send_can_message(telemetry::CanMsgType::DriverStatus, buf,
+                   telemetry::DRIVER_STATUS_PAYLOAD_SIZE);
 }
 
 static void on_reset(char* cmd) {
@@ -166,25 +174,28 @@ static void on_controller_mode(char* cmd) {
     return;
   }
 
+  BLDCMotor* m = &motor;
   if (mode == 'v') {
-    motor.controller = MotionControlType::velocity;
-    motor.target = 0.0f;
+    m->controller = MotionControlType::velocity;
+    m->target = 0.0f;
     CANDebug.println("Controller mode: velocity");
   } else {
-    motor.controller = MotionControlType::angle;
-    motor.target = motor.shaft_angle;
+    m->controller = MotionControlType::angle;
+    m->target = m->shaft_angle;
     CANDebug.println("Controller mode: angle");
   }
 }
 
 static void on_init_status(char* cmd) {
   (void)cmd;
-  uint8_t init_data[7] = {
-    init_errors,
-    motor.motor_status,
-    0x00, 0x00, 0x00, 0x00, 0x00
-  };
-  send_can_message(0x03, init_data, 8);
+  telemetry::InitStatusPayload payload = {};
+  payload.init_errors = init_errors;
+  payload.motor_status = motor.motor_status;
+
+  uint8_t buf[telemetry::INIT_STATUS_PAYLOAD_SIZE];
+  telemetry::init_status_encode(&payload, buf);
+  send_can_message(telemetry::CanMsgType::InitStatus, buf,
+                   telemetry::INIT_STATUS_PAYLOAD_SIZE);
 }
 
 void register_commands() {
@@ -202,9 +213,10 @@ void register_commands() {
 
 void run_command_loop() {
   command.run();
-  if (fdcan1.receiveFD0(CAN_RX_msg)) {
-    Serial.println((char*)CAN_RX_msg.data);
-    command.run((char*)CAN_RX_msg.data);
+  CANFDMessage rx_msg;
+  if (fdcan_recv(&rx_msg)) {
+    Serial.println((char*)rx_msg.data);
+    command.run((char*)rx_msg.data);
   }
 }
 

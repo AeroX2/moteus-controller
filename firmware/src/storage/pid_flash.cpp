@@ -1,6 +1,6 @@
 #include "storage/pid_flash.h"
 
-#include "app/app_context.h"
+#include "drivers/motor_objects.h"
 
 #include "stm32g4xx_hal_flash.h"
 #include "stm32g4xx_hal_flash_ex.h"
@@ -21,7 +21,7 @@ struct PidFlashData {
 };
 #pragma pack(pop)
 
-bool save_pid_to_flash(void) {
+bool save_pid_to_flash() {
   PidFlashData data = {};
   data.magic = PID_FLASH_MAGIC;
   data.cq_p = motor.PID_current_q.P;
@@ -66,7 +66,7 @@ bool save_pid_to_flash(void) {
   return true;
 }
 
-bool load_pid_from_flash(void) {
+bool load_pid_from_flash() {
   const PidFlashData* data = (const PidFlashData*)PID_FLASH_ADDR;
   if (data->magic != PID_FLASH_MAGIC) return false;
   motor.PID_current_q.P = data->cq_p;

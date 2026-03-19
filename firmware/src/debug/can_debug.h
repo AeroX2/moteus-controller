@@ -2,10 +2,14 @@
 
 #include <Arduino.h>
 
-#include "app/app_context.h"
+#include "telemetry/messages.h"
 
-// Consolidated CAN send function with internal CAN FD DLC rounding
-void send_can_message(uint8_t message_type, const uint8_t* data, uint8_t data_len = 8);
+extern uint32_t id;
+extern long update_frequency;
+extern uint8_t init_errors;
+
+// Consolidated CAN send function. payload_len = bytes in data; type byte is added internally.
+void send_can_message(telemetry::CanMsgType message_type, const uint8_t* data, uint8_t payload_len = 7);
 
 // Custom CAN Debug Interface - acts like Serial but sends via CAN
 class CANDebugInterface : public Print {
