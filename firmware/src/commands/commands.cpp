@@ -151,10 +151,7 @@ static void on_status(char* cmd) {
 }
 
 static void on_reset(char* cmd) {
-  (void)cmd;
-  driver.disable();
-  driver.clearFaults();
-  driver.enable();
+  NVIC_SystemReset();
 }
 
 static void on_update_frequency(char* cmd) {
