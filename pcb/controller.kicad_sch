@@ -16886,7 +16886,7 @@
 				(justify left bottom)
 			)
 		)
-		(property "Value" "5mOhm 1% 2W"
+		(property "Value" "10mOhm 1% 2W"
 			(at 252.222 494.03 0)
 			(effects
 				(font
@@ -25037,7 +25037,7 @@
 				(justify left bottom)
 			)
 		)
-		(property "Value" "5mOhm 1% 2W"
+		(property "Value" "10mOhm 1% 2W"
 			(at 300.482 494.03 0)
 			(effects
 				(font
@@ -26400,7 +26400,7 @@
 				(justify left bottom)
 			)
 		)
-		(property "Value" "5mOhm 1% 2W"
+		(property "Value" "10mOhm 1% 2W"
 			(at 346.202 494.03 0)
 			(effects
 				(font
