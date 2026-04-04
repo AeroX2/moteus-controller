@@ -106,7 +106,7 @@
 +      if (now_us- last_sample_us >= sample_interval_us) {
 +        last_sample_us = now_us;
 +        float mech = sensor->getMechanicalAngle();
-+        float zero_i = _normalizeAngle((float)(sensor_direction * pole_pairs) * mech- phase_cmd);
++        float zero_i = _normalizeAngle((float)(sensor_direction * pole_pairs) * mech- phase_cmd + _3PI_2);
 +        sum_sin += _sin(zero_i);
 +        sum_cos += _cos(zero_i);
 +      }
