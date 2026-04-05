@@ -1,6 +1,7 @@
 #include "app/motor_init.h"
 
 #include <Arduino.h>
+#include <cmath>
 
 #include "debug/can_debug.h"
 #include "drivers/motor_objects.h"
@@ -9,6 +10,7 @@
 
 #include "utilities/stm32math/STM32G4CORDICTrigFunctions.h"
 
+
 void motor_init() {
   Serial.println("Initializing CORDIC");
   if (!SimpleFOC_CORDIC_Config()) {
@@ -16,9 +18,10 @@ void motor_init() {
     init_errors |= 0x01;
   }
 
-  driver.voltage_power_supply = 24.0f;
-  driver.voltage_limit = 24.0f;
+  magnetic_sensor.init(&spi_class);
+  motor.linkSensor(&magnetic_sensor);
 
+  driver.voltage_power_supply = 24.0f;
   if (driver.init() == 0) {
     Serial.println("Driver init failed!");
     init_errors |= 0x02;
@@ -27,20 +30,15 @@ void motor_init() {
   }
 
   motor.linkDriver(&driver);
-  current_sense.linkDriver(&driver);
 
   Serial.print("Driver fault: ");
   Serial.println(driver.isFault() ? "true" : "false");
   if (driver.isFault()) init_errors |= 0x02;
 
-  if (motor.init() == 0) {
-    Serial.println("Motor init failed!");
-    init_errors |= 0x08;
-  } else {
-    Serial.println("Motor init success!");
-  }
+  motor.voltage_sensor_align = 2.0f;
 
   opamp_init();
+  current_sense.linkDriver(&driver);
   if (current_sense.init()) {
     Serial.println("Current sense init success!");
   } else {
@@ -49,44 +47,46 @@ void motor_init() {
   }
   motor.linkCurrentSense(&current_sense);
 
-  magnetic_sensor.init(&spi_class);
-  motor.linkSensor(&magnetic_sensor);
-
-  motor.monitor_downsample = 0;
-  motor.monitor_variables = 0;
-  motor.useMonitoring(CANDebug);
-
-  // Default motor limits, filters, and PID tuning
-  motor.current_limit = 3.0;
-  motor.voltage_limit = 8.0;
-  motor.velocity_limit = 100.0;
-  motor.voltage_sensor_align = 1.5;
+  motor.controller = MotionControlType::angle;
   motor.torque_controller = TorqueControlType::foc_current;
   motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
-  motor.controller = MotionControlType::angle;
 
-  motor.PID_current_q.P = 0.02;
-  motor.PID_current_q.I = 10.0;
-  motor.PID_current_q.output_ramp = 1000.0;
-  motor.PID_current_d.P = 0.02;
-  motor.PID_current_d.I = 10.0;
-  motor.PID_current_d.output_ramp = 1000.0;
+  motor.updateVelocityLimit(100.0f);
+  motor.updateCurrentLimit(20.0f);
 
   motor.LPF_current_q.Tf = 0.001;
   motor.LPF_current_d.Tf = 0.001;
-  motor.LPF_velocity.Tf = 0.02;
-
-  motor.PID_velocity.P = 0.15;
-  motor.PID_velocity.I = 0.003;
-  motor.PID_velocity.D = 0.0;
-  motor.PID_velocity.output_ramp = 400.0;
-
-  motor.P_angle.P = 10.0;
-  motor.P_angle.limit = 70.0;
 
   if (load_pid_from_flash()) Serial.println("Loaded PID values from flash.");
 
   delay(100);
+  if (motor.init() == 0) {
+    Serial.println("Motor init failed!");
+    init_errors |= 0x08;
+  } else {
+    Serial.println("Motor init success!");
+  }
+
+  if (motor.tuneCurrentController(500.0f) == 0) {
+    Serial.println("Current controller tuned!");
+  } else {
+    Serial.println("Current controller tuning failed!");
+    init_errors |= 0x10;
+  }
+
+  // motor.characteriseMotor(1.0f);
+  // Serial.println("Motor characterised!");
+  // Serial.print("Motor phase resistance: ");
+  // Serial.printf("%f", motor.phase_resistance);
+  // Serial.print(" Ω\n");
+  // Serial.print("Motor phase inductance: ");
+  // Serial.printf("%f", motor.phase_inductance);
+  // Serial.print(" H\n");
+  // Serial.print("Motor phase KV: ");
+  // Serial.printf("%f", motor.KV_rating);
+  // Serial.print(" RPM/V\n");
+  // return;
+
   if (motor.initFOC() == 0) {
     Serial.println("Motor FOC init failed!");
     init_errors |= 0x10;

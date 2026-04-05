@@ -209,7 +209,6 @@ void register_commands() {
 }
 
 void run_command_loop() {
-  command.run();
   CANFDMessage rx_msg;
   if (fdcan_recv(&rx_msg)) {
     Serial.println((char*)rx_msg.data);

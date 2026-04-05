@@ -6,9 +6,11 @@
 #include "stm32g4xx_hal_flash_ex.h"
 
 // PID storage in flash (last 2KB page of 128KB: 0x0801F800)
-#define PID_FLASH_MAGIC 0x50494453u  // "PIDS"
-#define PID_FLASH_PAGE 63
-#define PID_FLASH_ADDR (0x08000000u + (PID_FLASH_PAGE * 2048u))
+namespace {
+  constexpr uint32_t PID_FLASH_MAGIC = 0x50494453u;  // "PIDS"
+  constexpr uint32_t PID_FLASH_PAGE = 63;
+  constexpr uint32_t PID_FLASH_ADDR = 0x08000000u + (PID_FLASH_PAGE * 2048u);
+}  // namespace
 
 #pragma pack(push, 1)
 struct PidFlashData {

@@ -4,6 +4,7 @@ CAN Monitor and Command Script with Rich TUI
 Connects to COM3 at 115200 baud to monitor CAN FD messages and send commands
 """
 
+import math
 import serial
 import threading
 import time
@@ -19,6 +20,15 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.layout import Layout
 from rich import box
+
+# Motion: firmware sends angle [rad], velocity [rad/s] (MCU vel is instantaneous/noisy — not used for display).
+# Velocity: only from unwrapped angle slope over a time window (never from packet velocity field).
+_VELOCITY_WINDOW_S = 1.0  # seconds of history for slope (longer = smoother, slower to respond)
+# Full-window slope only if oldest→newest span ≥ this (else use last pair of samples — needed for ~10 Hz telemetry).
+_VELOCITY_MIN_DT_S = 0.08
+_VELOCITY_EMA_ALPHA = 0.18  # low-pass on window slope (smaller = smoother rad/s)
+_ANGLE_HISTORY_MAXLEN = 80
+_MOTION_GAP_RESET_S = 1.5  # reset estimator if telemetry gaps (e.g. disconnect)
 
 # Windows-compatible getch implementation
 def getch():
@@ -99,7 +109,70 @@ class CANMonitor:
         self.scroll_position = 0  # Current scroll position (0 = bottom, positive = scroll up)
         self.auto_scroll = True  # Whether to auto-scroll to bottom
         self.messages_per_page = 15  # Default, will be updated dynamically based on panel height
-        
+
+    def _update_motion_velocity(self, can_id: int, angle_rad: float, _vel_rad_s: float) -> None:
+        """Smoothed velocity (rad/s) from unwrapped angle history only; angle in UI stays raw from firmware."""
+        d = self.devices[can_id]
+        now = time.time()
+        if d.get("_motion_last_t") is not None and (now - d["_motion_last_t"]) > _MOTION_GAP_RESET_S:
+            d.pop("angle_history", None)
+            d.pop("prev_raw_angle", None)
+            d.pop("angle_unwrapped", None)
+            d.pop("vel_ema_rad_s", None)
+        d["_motion_last_t"] = now
+
+        if "angle_history" not in d:
+            d["angle_history"] = deque(maxlen=_ANGLE_HISTORY_MAXLEN)
+            d["prev_raw_angle"] = None
+            d["angle_unwrapped"] = None
+            d["vel_ema_rad_s"] = None
+
+        pa = d["prev_raw_angle"]
+        if pa is None:
+            d["angle_unwrapped"] = angle_rad
+        else:
+            delta = angle_rad - pa
+            while delta > math.pi:
+                delta -= 2.0 * math.pi
+            while delta < -math.pi:
+                delta += 2.0 * math.pi
+            d["angle_unwrapped"] += delta
+        d["prev_raw_angle"] = angle_rad
+        d["angle_history"].append((now, d["angle_unwrapped"]))
+
+        hist = d["angle_history"]
+        while len(hist) >= 2 and (hist[-1][0] - hist[0][0]) > _VELOCITY_WINDOW_S:
+            hist.popleft()
+
+        v_window_rad_s = None
+        if len(hist) >= 2:
+            t0, a0 = hist[0]
+            t1, a1 = hist[-1]
+            dt = t1 - t0
+            if dt >= _VELOCITY_MIN_DT_S:
+                v_window_rad_s = (a1 - a0) / dt
+            else:
+                # ~100 ms between packets → full window < 80 ms until 2nd sample; use last step Δθ/Δt
+                t_prev, a_prev = hist[-2]
+                t_last, a_last = hist[-1]
+                dt_step = t_last - t_prev
+                if dt_step > 1e-6:
+                    v_window_rad_s = (a_last - a_prev) / dt_step
+
+        if v_window_rad_s is not None:
+            if d["vel_ema_rad_s"] is None:
+                d["vel_ema_rad_s"] = v_window_rad_s
+            else:
+                d["vel_ema_rad_s"] = (
+                    _VELOCITY_EMA_ALPHA * v_window_rad_s
+                    + (1.0 - _VELOCITY_EMA_ALPHA) * d["vel_ema_rad_s"]
+                )
+
+        if d["vel_ema_rad_s"] is None:
+            d["velocity_display"] = 0.0
+        else:
+            d["velocity_display"] = d["vel_ema_rad_s"]
+
     def connect(self):
         """Connect to the serial port"""
         try:
@@ -263,12 +336,13 @@ class CANMonitor:
                                     'last_seen': time.time()
                                 }
                             
-                            # Update motion data
+                            # Update motion data (angle/velocity from MCU in radians / rad/s)
                             self.devices[can_id]['angle'] = angle
                             self.devices[can_id]['velocity'] = velocity
                             self.devices[can_id]['last_seen'] = time.time()
                             self.unique_ids.add(can_id)
-                            
+                            self._update_motion_velocity(can_id, angle, velocity)
+
                             return can_id, angle, velocity, 'motion'
                     
             except (ValueError, struct.error) as e:
@@ -471,7 +545,10 @@ class CANMonitor:
                 
                 # Add motion data if available
                 if 'angle' in info and info['angle'] is not None and 'velocity' in info and info['velocity'] is not None:
-                    motion_part = f"[white]{info['angle']:+4.3f}°[/white] [white]{info['velocity']:+4.1f}°/s[/white]"
+                    v_rad_s = info.get('velocity_display')
+                    if v_rad_s is None:
+                        v_rad_s = 0.0
+                    motion_part = f"[white]{info['angle']:+4.3f}°[/white] [white]{v_rad_s:+4.1f}[/white][dim] rad/s[/dim]"
                 
                 # Add status data if available
                 if 'status' in info and info['status'] is not None:

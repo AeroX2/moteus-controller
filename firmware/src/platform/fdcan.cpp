@@ -1,7 +1,7 @@
 // Single translation unit for ACANFD_STM32 - defines fdcan1 and IRQ handlers.
+#include "debug/can_debug.h"
 #include "platform/fdcan.h"
 
-#include <Arduino.h>
 #include <ACANFD_STM32.h>
 #include <ACANFD_STM32_Settings.h>
 #include <ACANFD_STM32_Filters.h>
