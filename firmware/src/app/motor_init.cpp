@@ -35,7 +35,7 @@ void motor_init() {
   Serial.println(driver.isFault() ? "true" : "false");
   if (driver.isFault()) init_errors |= 0x02;
 
-  motor.voltage_sensor_align = 2.0f;
+  motor.voltage_sensor_align = 1.5f;
 
   opamp_init();
   current_sense.linkDriver(&driver);

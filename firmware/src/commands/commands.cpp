@@ -126,6 +126,12 @@ static void on_save_pid(char* cmd) {
   else CANDebug.println("PID save failed.");
 }
 
+static void on_erase_pid_flash(char* cmd) {
+  (void)cmd;
+  if (erase_pid_from_flash()) CANDebug.println("PID flash erased.");
+  else CANDebug.println("PID flash erase failed.");
+}
+
 static void on_led(char* cmd) {
   digitalWrite(PC2, cmd[0] == '0' ? LOW : HIGH);
 }
@@ -206,6 +212,7 @@ void register_commands() {
   command.add('I', on_init_status, "init status");
   command.add('P', on_pid, "pid tune/print");
   command.add('W', on_save_pid, "save PID to flash");
+  command.add('X', on_erase_pid_flash, "erase PID flash");
 }
 
 void run_command_loop() {

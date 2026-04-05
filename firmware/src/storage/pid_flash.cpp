@@ -23,6 +23,30 @@ struct PidFlashData {
 };
 #pragma pack(pop)
 
+namespace {
+
+bool erase_pid_page_unlocked() {
+  FLASH_EraseInitTypeDef erase = {};
+  erase.TypeErase = FLASH_TYPEERASE_PAGES;
+  erase.Banks = FLASH_BANK_1;
+  erase.Page = PID_FLASH_PAGE;
+  erase.NbPages = 1;
+  uint32_t pageError = 0;
+  return HAL_FLASHEx_Erase(&erase, &pageError) == HAL_OK;
+}
+
+}  // namespace
+
+bool erase_pid_from_flash() {
+  HAL_FLASH_Unlock();
+  if (!erase_pid_page_unlocked()) {
+    HAL_FLASH_Lock();
+    return false;
+  }
+  HAL_FLASH_Lock();
+  return true;
+}
+
 bool save_pid_to_flash() {
   PidFlashData data = {};
   data.magic = PID_FLASH_MAGIC;
@@ -41,13 +65,7 @@ bool save_pid_to_flash() {
   data.velocity_limit = motor.velocity_limit;
 
   HAL_FLASH_Unlock();
-  FLASH_EraseInitTypeDef erase = {};
-  erase.TypeErase = FLASH_TYPEERASE_PAGES;
-  erase.Banks = FLASH_BANK_1;
-  erase.Page = PID_FLASH_PAGE;
-  erase.NbPages = 1;
-  uint32_t pageError = 0;
-  if (HAL_FLASHEx_Erase(&erase, &pageError) != HAL_OK) {
+  if (!erase_pid_page_unlocked()) {
     HAL_FLASH_Lock();
     return false;
   }

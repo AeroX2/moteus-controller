@@ -27,8 +27,10 @@ static uint32_t foc_next_us = 0;
 #endif
 
 // Per-cycle only: interval = wall time since previous FOC *start* (not cumulative backlog).
+// Cooperative loop only (see #ifndef FOC_USE_HARDWARE_TIMER). Hardware-timer FOC does not use this.
 static constexpr uint32_t FOC_TIMING_WARN_INTERVAL_OVER_PERIOD_US = 50;  // warn if interval > period + this
-static constexpr uint32_t FOC_TIMING_WARN_EXEC_FRAC = 9;                 // warn if exec*10 > period*9
+// exec*10 > period*FRAC → warn if exec > (FRAC/10)*period. FRAC=10 → warn only if exec exceeds full period.
+static constexpr uint32_t FOC_TIMING_WARN_EXEC_FRAC = 10;
 static constexpr uint32_t FOC_TIMING_WARN_MIN_INTERVAL_MS = 250;
 
 #ifndef FOC_USE_HARDWARE_TIMER
