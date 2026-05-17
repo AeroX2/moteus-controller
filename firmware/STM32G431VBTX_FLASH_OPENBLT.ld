@@ -11,6 +11,13 @@
  *
  *            Set memory bank area and size if external memory is used
  ******************************************************************************
+ * @note     OpenBLT variant: same layout as STM32G431VBTX_FLASH.ld, but the
+ *            FLASH region starts at 0x08000000 + LD_FLASH_OFFSET (bootloader
+ *            reserved size; match board_build.flash_offset in platformio.ini).
+ *            LENGTH is reduced by LD_FLASH_OFFSET so the image
+ *            still ends at 0x08000000 + 124K (final 4 KB page reserved). Requires
+ *            --defsym=LD_FLASH_OFFSET=... from the build (PlatformIO stm32duino).
+ ******************************************************************************
  * @attention
  *
  * <h2><center>&copy; Copyright (c) 2020 STMicroelectronics.
@@ -31,13 +38,13 @@ ENTRY(Reset_Handler)
 _estack = ORIGIN(RAM) + LENGTH(RAM);	/* end of "RAM" Ram type memory */
 
 _Min_Heap_Size = 0x200 ;	/* required amount of heap  */
-_Min_Stack_Size = 0x400 ;	/* required amount of stack */
+_Min_Stack_Size = 0x400 ;	/* required amount of stack  */
 
 /* Memories definition */
 MEMORY
 {
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 32K
-  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 124K
+  FLASH    (rx)    : ORIGIN = 0x8000000 + LD_FLASH_OFFSET,   LENGTH = 124K - LD_FLASH_OFFSET
   DATA    (xrw)    : ORIGIN = 0x8000000 + 124K,   LENGTH = 4K
 }
 

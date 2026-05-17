@@ -4,3 +4,8 @@
 .vscode/launch.json
 .vscode/ipch
 __pycache__/
+host_openblt_flash/build/
+host_openblt_flash/build_mingw/
+host_openblt_flash/build_fast/
+host_openblt_flash/build_agent_test/
+host_openblt_flash/build_verbose.log
