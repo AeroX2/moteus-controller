@@ -1,0 +1,7 @@
+[submodule "openblt"]
+	path = openblt
+	url = https://github.com/AeroX2/openblt.git
+	branch = master
+[submodule "bootloader"]
+	path = bootloader
+	url = https://github.com/AeroX2/OpenBLT-STM32.git
