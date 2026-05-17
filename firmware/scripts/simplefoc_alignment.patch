@@ -1,6 +1,6 @@
 --- a/src/common/base_classes/FOCMotor.cpp
 +++ b/src/common/base_classes/FOCMotor.cpp
-@@ -858,69 +858,118 @@
+@@ -858,69 +858,133 @@
    float voltage_align = voltage_sensor_align;
  
    // if unknown natural direction
@@ -110,6 +110,21 @@
 +        sum_sin += _sin(zero_i);
 +        sum_cos += _cos(zero_i);
 +      }
++      _delay(2);
++    }
++    // same duration/speed backward one mechanical revolution (no extra samples) to return rotor
++    setPhaseVoltage(0, 0, 0);
++    _delay(pause_reverse_us / 1000);
++    t0 = _micros();
++    while (1) {
++      unsigned long now_us = _micros();
++      unsigned long elapsed = now_us - t0;
++      if (elapsed >= duration_zero_us) break;
++      float t_sec = (float)elapsed * 1e-6f;
++      float phase_cmd = _normalizeAngle(_3PI_2 + _2PI * ((float)pole_pairs - t_sec * alignment_speed_elec_rev_per_s));
++      float v = (elapsed < ramp_up_us) ? (voltage_align * (float)elapsed / (float)ramp_up_us) : voltage_align;
++      setPhaseVoltage(v, 0, phase_cmd);
++      sensor->update();
 +      _delay(2);
 +    }
 +    zero_electric_angle = _normalizeAngle(_atan2(sum_sin, sum_cos));
