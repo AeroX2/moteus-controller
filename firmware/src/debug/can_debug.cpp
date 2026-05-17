@@ -31,7 +31,8 @@ void send_can_message(CanMsgType message_type, const uint8_t* data, uint8_t payl
   tx_msg.id = id;
   tx_msg.len = dlc;
   tx_msg.ext = true;
-  tx_msg.type = CANFDMessage::CANFD_NO_BIT_RATE_SWITCH;
+  /* Match OpenBLT upload path (1M nominal / 5M data with BRS) so one monitor config works for both. */
+  tx_msg.type = CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH;
   tx_msg.data[0] = static_cast<uint8_t>(message_type);
 
   int copy_bytes = (payload_len > 0) ? payload_len : 0;
