@@ -9,3 +9,5 @@ host_openblt_flash/build_mingw/
 host_openblt_flash/build_fast/
 host_openblt_flash/build_agent_test/
 host_openblt_flash/build_verbose.log
+# Local clone of mjbots/fdcanusb hardware repo (not part of moteus-controller).
+fdcanusb/

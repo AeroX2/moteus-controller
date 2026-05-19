@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 CAN Monitor and Command Script with Rich TUI
-Connects to COM3 at 115200 baud to monitor CAN FD messages and send commands
+Connects to COM5 at 115200 baud to monitor CAN FD messages and send commands
 """
 
 import math
+import os
 import serial
 import threading
 import time
@@ -89,7 +90,7 @@ def getch():
     return None
 
 class CANMonitor:
-    def __init__(self, port='COM3', baudrate=115200):
+    def __init__(self, port='COM5', baudrate=115200):
         self.port = port
         self.baudrate = baudrate
         self.ser = None
@@ -103,7 +104,16 @@ class CANMonitor:
         self.selected_device_index = 0
         self.pending_status_requests = set()  # Track devices we've sent status commands to
         self.message_count = 0  # Counter for real-time messages
+        self.raw_line_count = 0  # Count of any complete serial lines received
+        self.raw_byte_count = 0  # Count of all bytes read from serial
         self.last_message_time = time.time()  # Track message timing
+        self.last_raw_line_time = time.time()
+        self.last_raw_byte_time = time.time()
+        self.last_unparsed_log_time = 0.0
+        self.last_raw_chunk_log_time = 0.0
+        self._rx_buffer = ""
+        self.raw_logging = False
+        self.raw_log_path = os.path.join(os.path.dirname(__file__), "can_raw.log")
         
         # Scroll tracking
         self.scroll_position = 0  # Current scroll position (0 = bottom, positive = scroll up)
@@ -180,7 +190,7 @@ class CANMonitor:
             self.ser = serial.Serial(
                 self.port, 
                 self.baudrate, 
-                timeout=0.001,  # Much shorter timeout for faster response
+                timeout=0.01,  # Avoid excessive line fragmentation at high traffic rates
                 write_timeout=0.1,
                 inter_byte_timeout=None,  # Disable inter-byte timeout
                 exclusive=True  # Exclusive access for better performance
@@ -208,14 +218,24 @@ class CANMonitor:
         # Auto-scroll to bottom when new messages arrive
         if self.auto_scroll:
             self.scroll_position = 0
+
+    def _raw_preview(self, data: bytes, max_len: int = 32) -> str:
+        """Compact hex+ascii preview for raw serial chunks."""
+        if not data:
+            return "len=0"
+        shown = data[:max_len]
+        hex_part = shown.hex(" ").upper()
+        ascii_part = "".join(chr(b) if 32 <= b <= 126 else "." for b in shown)
+        suffix = " ..." if len(data) > max_len else ""
+        return f"len={len(data)} hex=[{hex_part}]{suffix} ascii='{ascii_part}'{suffix}"
     
     def parse_message(self, line):
         """Parse CAN message line like: rcv 56004D 99C4734000000000 E B F r f-1"""
         parts = line.strip().split()
-        if len(parts) >= 3 and parts[0] == 'rcv':
+        if len(parts) >= 3 and parts[0].lower() == 'rcv':
             try:
                 # Extract ID and data
-                can_id = parts[1]
+                can_id = parts[1].upper()
                 data_hex = parts[2]
                 
                 # Convert hex data to bytes
@@ -247,6 +267,7 @@ class CANMonitor:
                                     'status': None,
                                     'last_seen': time.time()
                                 }
+                                self.add_message(f"[green]Discovered CAN device {can_id}[/green]")
                             
                             # Update status
                             self.devices[can_id]['status'] = {
@@ -335,6 +356,7 @@ class CANMonitor:
                                     'status': None,
                                     'last_seen': time.time()
                                 }
+                                self.add_message(f"[green]Discovered CAN device {can_id}[/green]")
                             
                             # Update motion data (angle/velocity from MCU in radians / rad/s)
                             self.devices[can_id]['angle'] = angle
@@ -354,33 +376,83 @@ class CANMonitor:
         """Monitor serial port for incoming data"""
         while self.running:
             try:
-                if self.ser and self.ser.in_waiting:
-                    line = self.ser.readline().decode('utf-8', errors='ignore')
-                    if line.strip():
-                        can_id, angle, velocity, msg_type = self.parse_message(line)
-                        if can_id:
-                            # Update message counter and timing
-                            self.message_count += 1
-                            current_time = time.time()
-                            time_since_last = current_time - self.last_message_time
-                            self.last_message_time = current_time
-                            
-                            if msg_type == 'motion':
-                                # Motion messages are handled silently for performance
-                                # but we could add a counter for debugging
-                                pass
-                            elif msg_type == 'status':
-                                status_info = self.devices[can_id]['status']
-                                self.add_message(f"[cyan]CAN {can_id}[/cyan]: Status: Lock={status_info['lock']}, VCC={status_info['vcc_uvlo']}, VDS={status_info['vds_p']}, Reset={status_info['reset']}, THSD={status_info['thsd']}, Ready={status_info['ready']}, Fault={status_info['fault']}")
-                            elif msg_type == 'init_status':
-                                # This is already handled in parse_message
-                                pass
-                            elif msg_type == 'debug':
-                                # Debug messages are handled silently for performance
-                                pass
+                if self.ser:
+                    raw = self.ser.read(self.ser.in_waiting or 1)
+                    if raw:
+                        self.raw_byte_count += len(raw)
+                        self.last_raw_byte_time = time.time()
+
+                        if self.raw_logging:
+                            try:
+                                with open(self.raw_log_path, "ab") as f:
+                                    f.write(raw)
+                            except Exception as e:
+                                self.add_message(f"[red]Raw log write error:[/red] {e}")
+
+                            now = time.time()
+                            if now - self.last_raw_chunk_log_time >= 0.1:
+                                self.last_raw_chunk_log_time = now
+                                self.add_message(
+                                    f"[magenta]RAW chunk[/magenta] {self._raw_preview(raw)}"
+                                )
+
+                        self._rx_buffer += raw.decode('utf-8', errors='ignore')
+
+                        while True:
+                            # Accept either CR or LF line terminators (different fdcanusb
+                            # firmwares/hosts may emit '\r', '\n', or '\r\n').
+                            nl = self._rx_buffer.find('\n')
+                            cr = self._rx_buffer.find('\r')
+                            if nl < 0 and cr < 0:
+                                break
+                            if nl < 0:
+                                split_idx = cr
+                            elif cr < 0:
+                                split_idx = nl
                             else:
-                                # Show other serial output
-                                self.add_message(f"[white]Serial:[/white] {line.strip()}")
+                                split_idx = min(nl, cr)
+
+                            line = self._rx_buffer[:split_idx]
+                            self._rx_buffer = self._rx_buffer[split_idx + 1:]
+                            # Consume paired terminator in CRLF / LFCR cases.
+                            if self._rx_buffer and self._rx_buffer[0] in ('\r', '\n'):
+                                self._rx_buffer = self._rx_buffer[1:]
+
+                            stripped_line = line.strip('\r').strip()
+                            if not stripped_line:
+                                continue
+
+                            self.raw_line_count += 1
+                            self.last_raw_line_time = time.time()
+
+                            can_id, angle, velocity, msg_type = self.parse_message(stripped_line)
+                            if can_id:
+                                # Update message counter and timing
+                                self.message_count += 1
+                                self.last_message_time = time.time()
+
+                                if msg_type == 'motion':
+                                    # Motion messages are handled silently for performance
+                                    pass
+                                elif msg_type == 'status':
+                                    status_info = self.devices[can_id]['status']
+                                    self.add_message(f"[cyan]CAN {can_id}[/cyan]: Status: Lock={status_info['lock']}, VCC={status_info['vcc_uvlo']}, VDS={status_info['vds_p']}, Reset={status_info['reset']}, THSD={status_info['thsd']}, Ready={status_info['ready']}, Fault={status_info['fault']}")
+                                elif msg_type == 'init_status':
+                                    # This is already handled in parse_message
+                                    pass
+                                elif msg_type == 'debug':
+                                    # Debug messages are already logged in parse_message
+                                    pass
+                                else:
+                                    self.add_message(f"[white]Serial:[/white] {stripped_line}")
+                            else:
+                                if stripped_line.lower().startswith("rcv"):
+                                    now = time.time()
+                                    if now - self.last_unparsed_log_time >= 1.0:
+                                        self.last_unparsed_log_time = now
+                                        self.add_message(f"[yellow]Unparsed CAN line:[/yellow] {stripped_line}")
+                                else:
+                                    self.add_message(f"[white]Serial:[/white] {stripped_line}")
                 
                 # Reduced sleep time for faster response
                 time.sleep(0.001)  # 1ms instead of 10ms
@@ -476,10 +548,18 @@ class CANMonitor:
         messages_text = Text()
         
         # Add real-time statistics
-        if self.message_count > 0:
+        if self.raw_line_count > 0 or self.message_count > 0:
             current_time = time.time()
             time_since_last = current_time - self.last_message_time
-            messages_text.append_text(Text.from_markup(f"[dim]Messages: {self.message_count} | Last: {time_since_last:.3f}s ago[/dim]\n"))
+            raw_since_last = current_time - self.last_raw_line_time
+            raw_byte_since_last = current_time - self.last_raw_byte_time
+            messages_text.append_text(
+                Text.from_markup(
+                    f"[dim]Parsed CAN: {self.message_count} | Raw lines: {self.raw_line_count} | "
+                    f"Raw bytes: {self.raw_byte_count} | Last CAN: {time_since_last:.3f}s ago | "
+                    f"Last raw line: {raw_since_last:.3f}s ago | Last raw byte: {raw_byte_since_last:.3f}s ago[/dim]\n"
+                )
+            )
         
         # Calculate scroll window
         total_messages = len(self.messages)
@@ -606,7 +686,8 @@ class CANMonitor:
             if self.selected_device_index < len(device_list):
                 selected_device = device_list[self.selected_device_index]
         
-        cmd_markup = f"[bold]Commands:[/bold] [yellow]<cmd>[/yellow] [dim]|[/dim] [yellow]tab[/yellow] [dim]|[/dim] [yellow]↑↓[/yellow] [dim]|[/dim] [yellow]home[/yellow] [dim]|[/dim] [yellow]stats[/yellow] [dim]|[/dim] [yellow]quit[/yellow] [dim]| Selected:[/dim] [cyan]{selected_device}[/cyan]\n[bold green]>[/bold green] [white]{self.current_command}[/white][dim]_[/dim]"
+        raw_flag = "ON" if self.raw_logging else "OFF"
+        cmd_markup = f"[bold]Commands:[/bold] [yellow]<cmd>[/yellow] [dim]|[/dim] [yellow]tab[/yellow] [dim]|[/dim] [yellow]↑↓[/yellow] [dim]|[/dim] [yellow]home[/yellow] [dim]|[/dim] [yellow]stats[/yellow] [dim]|[/dim] [yellow]raw on/off[/yellow] [dim]|[/dim] [yellow]quit[/yellow] [dim]| Selected:[/dim] [cyan]{selected_device}[/cyan] [dim]| Raw:[/dim] [magenta]{raw_flag}[/magenta]\n[bold green]>[/bold green] [white]{self.current_command}[/white][dim]_[/dim]"
         cmd_text = Text.from_markup(cmd_markup)
         
         layout["command"].update(
@@ -632,11 +713,32 @@ class CANMonitor:
             # Show real-time statistics
             current_time = time.time()
             time_since_last = current_time - self.last_message_time
-            self.add_message(f"[cyan]Real-time Stats:[/cyan] Messages: {self.message_count} | Last message: {time_since_last:.3f}s ago | Devices: {len(self.devices)}")
+            raw_byte_since_last = current_time - self.last_raw_byte_time
+            self.add_message(
+                f"[cyan]Real-time Stats:[/cyan] Parsed={self.message_count} | "
+                f"Raw lines={self.raw_line_count} | Raw bytes={self.raw_byte_count} | "
+                f"Last CAN={time_since_last:.3f}s | Last byte={raw_byte_since_last:.3f}s | "
+                f"Devices={len(self.devices)}"
+            )
+        elif cmd.lower() == 'raw on':
+            self.raw_logging = True
+            self.add_message(f"[magenta]Raw logging enabled[/magenta] -> {self.raw_log_path}")
+        elif cmd.lower() == 'raw off':
+            self.raw_logging = False
+            self.add_message("[magenta]Raw logging disabled[/magenta]")
+        elif cmd.lower() == 'raw clear':
+            self._rx_buffer = ""
+            self.raw_byte_count = 0
+            self.raw_line_count = 0
+            self.message_count = 0
+            self.add_message("[magenta]Raw counters and RX buffer cleared[/magenta]")
         elif cmd.lower() == 'list':
             self.add_message("[yellow]Device list updated in sidebar[/yellow]")
         elif cmd.lower() == 'help':
-            self.add_message("[yellow]Commands: <command> (send to selected device), tab (cycle devices), ↑↓ (scroll messages), home (reset scroll), stats (show statistics), quit[/yellow]")
+            self.add_message(
+                "[yellow]Commands: <command> (send to selected device), tab (cycle devices), ↑↓ (scroll messages), "
+                "home (reset scroll), stats, raw on|raw off|raw clear, quit[/yellow]"
+            )
         elif cmd.lower() == 'home':
             self.scroll_position = 0
             self.auto_scroll = True
@@ -701,6 +803,18 @@ def main():
     monitor = CANMonitor()
     
     if not monitor.connect():
+        # Print connection failure to stdout so startup failures are visible
+        # even when the TUI never launches.
+        if monitor.messages:
+            raw = monitor.messages[-1]
+            try:
+                from rich.markup import render as _render_markup
+                msg = "".join(span.text for span in _render_markup(raw))
+            except Exception:
+                msg = raw
+            print(msg)
+        else:
+            print(f"Failed to connect to {monitor.port}")
         return
     
     try:
